@@ -667,8 +667,8 @@
    ===================================================================================== */
 
 /* ================== یہاں اپنی Apps Script ویب ایپ کی تفصیل پیسٹ کریں ================== */
-const BACKEND_URL = "https://script.google.com/macros/s/AKfycbythqzQTYgDqJYxaNJtJka_jG5H_yDHUAGl4D_zTaHZvqvGiRr9lg-vYqdd6xRD7C_LKA/exec";
-const API_KEY = "Sf9k2mQz7xLp4vNw8eRt3yUiH6dGbCjA"; // وہی سیکرٹ جو Code.gs میں API_KEY میں لکھی
+const BACKEND_URL = "https://script.google.com/macros/s/YOUR_DEPLOYMENT_ID/exec";
+const API_KEY = "YOUR_API_KEY_HERE"; // وہی سیکرٹ جو Code.gs میں API_KEY میں لکھی
 /* =================================================================================== */
 
 const CONFIG_IS_SET = !!(BACKEND_URL && !BACKEND_URL.includes("YOUR_DEPLOYMENT_ID") && API_KEY && !API_KEY.includes("YOUR_API_KEY_HERE"));
@@ -2460,12 +2460,16 @@ async function renderDistrictReport(){
 async function renderDashboard(){
   const body=document.getElementById('dashboardBody');
   body.innerHTML='<div class="empty">لوڈ ہو رہا ہے...</div>';
-  const data = await buildLedgerData();
-  const appr = await getApprovalStatus();
+  const needSubCount = (currentUser.role!=='box' && !viewingCode);
+  const [data, appr, subsList] = await Promise.all([
+    buildLedgerData(),
+    getApprovalStatus(),
+    needSubCount ? getSubordinates() : Promise.resolve([])
+  ]);
   const roleLabel = ROLE_LABELS[currentUser.role||'box'];
   const isOwnDash = activeCode()===currentUser.code;
   const apprLine = `<div class="note">اس مہینے کی حالت: <b>${currentHolderLabel(appr, isOwnDash)}</b></div>`;
-  const subCount = (currentUser.role!=='box' && !viewingCode) ? (await getSubordinates()).length : 0;
+  const subCount = subsList.length;
   body.innerHTML = `
     <p style="margin-top:0;">خوش آمدید، <b>${currentUser.name}</b> (${roleLabel}) — ${urduMonths[data.profile.month]} ${data.profile.year} کا خلاصہ:</p>
     <div class="summary-grid">
