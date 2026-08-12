@@ -1612,7 +1612,13 @@ function displayDistricts(u){
   if(u && Array.isArray(u.districts) && u.districts.length) return u.districts.join('، ');
   return (u && u.district) || '';
 }
-async function getAllUsers(){ return await fsListAll('users'); }
+async function getAllUsers(){
+  const raw = await fsListAll('users');
+  // Kabhi kabhi kisi wajah se ek adhoori/kharab record bhi collection mein aa sakti hai
+  // (misal: khali naam/code). Aisi record ko yahan chhaan kar nikal dete hain taake yeh
+  // akeli record sab ke liye poori list (ماتحت، تلاش، وغیرہ) crash na kar de.
+  return raw.filter(u => u && typeof u==='object' && u.code);
+}
 // Determines the FIRST checker stage for a submitter, per the org hierarchy:
 // box -> supervisor (or district, if no supervisor assigned to that box) -> [district_office delivery] -> done
 // supervisor / district_office -> district -> [district_office delivery] -> done
