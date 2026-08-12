@@ -667,7 +667,7 @@
    ===================================================================================== */
 
 /* ================== یہاں اپنی Apps Script ویب ایپ کی تفصیل پیسٹ کریں ================== */
-const BACKEND_URL = "https://script.google.com/macros/s/AKfycbythqzQTYgDqJYxaNJtJka_jG5H_yDHUAGl4D_zTaHZvqvGiRr9lg-vYqdd6xRD7C_LKA/exec";
+const BACKEND_URL = "https://script.google.com/macros/s/AKfycbycQm0RGb8lGeGe2LmE_3k7RyKUtEDBWK2fwClrb488bwfeinxpBLuuSjESNVnXONqkQA/exec";
 const API_KEY = "Sf9k2mQz7xLp4vNw8eRt3yUiH6dGbCjA"; // وہی سیکرٹ جو Code.gs میں API_KEY میں لکھی
 /* =================================================================================== */
 
@@ -689,31 +689,36 @@ async function _apiCall(action, params, bodyObj, _isRetry){
   url.searchParams.set('action', action);
   url.searchParams.set('key', API_KEY);
   Object.keys(params||{}).forEach(k=>url.searchParams.set(k, params[k]));
-  const opts = {};
+  const opts = { credentials: 'omit' }; // Google session cookies kabhi na bhejein — warna
+  // multiple Google accounts sign-in hone par account-confusion se request fail ho sakti hai
   if(bodyObj !== undefined){
     opts.method = 'POST';
     opts.headers = { 'Content-Type': 'text/plain;charset=utf-8' }; // preflight se bachne ke liye
     opts.body = JSON.stringify(bodyObj);
   }
+  let res;
   try{
-    const res = await fetch(url.toString(), opts);
-    const json = await res.json();
-    if(json && json.error){
-      const err = new Error(json.error);
-      err.isApiError = true;
-      err.raw = json.error;
-      throw err;
-    }
-    return json;
-  }catch(err){
-    // Google Apps Script kabhi kabhi waqti (transient) taur par masroof/dheema ho sakta hai —
-    // is liye ek dafa khud-b-khud dobara koshish karte hain user ko error dikhane se pehle.
+    res = await fetch(url.toString(), opts);
+  }catch(networkErr){
+    // Yeh sirf asal network masla hai (connection tut gaya waghera) — is par ek dafa dobara
+    // koshish karna faida-mand hai.
     if(!_isRetry){
-      await new Promise(r=>setTimeout(r, 900));
+      await new Promise(r=>setTimeout(r, 700));
       return _apiCall(action, params, bodyObj, true);
     }
+    throw networkErr;
+  }
+  const json = await res.json();
+  if(json && json.error){
+    // Yeh server ne khud bataya hai (misal: masroof hai, ya din ki hadd puri ho gayi) — is
+    // par foran dobara koshish karne se koi faida nahi (behtar nahi hoga), sirf waqt aur
+    // server ka boojh barhta hai. Foran error dikha dete hain.
+    const err = new Error(json.error);
+    err.isApiError = true;
+    err.raw = json.error;
     throw err;
   }
+  return json;
 }
 async function fsGet(col,id){
   try{ const r = await _apiCall('get', {col, id}); return r.data; }
