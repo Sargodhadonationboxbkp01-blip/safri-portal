@@ -1051,7 +1051,13 @@ async function enterApp(landingTab){
   document.getElementById('tabSubmitted').classList.toggle('hidden', hasNoSubs);
   document.getElementById('tabVerified').classList.toggle('hidden', hasNoSubs);
   document.getElementById('tabAddUser').classList.toggle('hidden', currentUser.role!=='admin');
-  await Promise.all([ loadProfileIntoForm(), loadSlabsIntoForm(), refreshOrgNameLabel() ]);
+  try{
+    await Promise.all([ loadProfileIntoForm(), loadSlabsIntoForm(), refreshOrgNameLabel() ]);
+  }catch(e){
+    console.error('enterApp failed:', e);
+    document.getElementById('dashboardBody').innerHTML = `<div class="empty">⚠️ ڈیٹا لوڈ نہیں ہو سکا — ڈیٹا میں کوئی خرابی ہے۔<br><button class="btn-primary" style="margin-top:10px;" onclick="location.reload()">دوبارہ کوشش کریں</button></div>`;
+    return;
+  }
   updateSubmittedBadgeCount();
   showAppTab(landingTab || loadLastTab() || 'dashboard');
 }
@@ -2482,11 +2488,18 @@ async function renderDashboard(){
   const body=document.getElementById('dashboardBody');
   body.innerHTML='<div class="empty">لوڈ ہو رہا ہے...</div>';
   const needSubCount = (currentUser.role!=='box' && !viewingCode);
-  const [data, appr, subsList] = await Promise.all([
-    buildLedgerData(),
-    getApprovalStatus(),
-    needSubCount ? getSubordinates() : Promise.resolve([])
-  ]);
+  let data, appr, subsList;
+  try{
+    [data, appr, subsList] = await Promise.all([
+      buildLedgerData(),
+      getApprovalStatus(),
+      needSubCount ? getSubordinates() : Promise.resolve([])
+    ]);
+  }catch(e){
+    console.error('renderDashboard failed:', e);
+    body.innerHTML = `<div class="empty">⚠️ ڈیش بورڈ لوڈ نہیں ہو سکا — ڈیٹا میں کوئی خرابی ہے۔<br><button class="btn-primary" style="margin-top:10px;" onclick="renderDashboard()">دوبارہ کوشش کریں</button></div>`;
+    return;
+  }
   const roleLabel = ROLE_LABELS[currentUser.role||'box'];
   const isOwnDash = activeCode()===currentUser.code;
   const apprLine = `<div class="note">اس مہینے کی حالت: <b>${currentHolderLabel(appr, isOwnDash)}</b></div>`;
