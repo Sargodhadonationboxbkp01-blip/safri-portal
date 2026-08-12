@@ -684,7 +684,7 @@ function _fsInvalidate(col){
   delete _fsCache.listAll[col];
   Object.keys(_fsCache.listWhere).forEach(k=>{ if(k.indexOf(col+'::')===0) delete _fsCache.listWhere[k]; });
 }
-async function _apiCall(action, params, bodyObj){
+async function _apiCall(action, params, bodyObj, _isRetry){
   const url = new URL(BACKEND_URL);
   url.searchParams.set('action', action);
   url.searchParams.set('key', API_KEY);
@@ -695,15 +695,25 @@ async function _apiCall(action, params, bodyObj){
     opts.headers = { 'Content-Type': 'text/plain;charset=utf-8' }; // preflight se bachne ke liye
     opts.body = JSON.stringify(bodyObj);
   }
-  const res = await fetch(url.toString(), opts);
-  const json = await res.json();
-  if(json && json.error){
-    const err = new Error(json.error);
-    err.isApiError = true;
-    err.raw = json.error;
+  try{
+    const res = await fetch(url.toString(), opts);
+    const json = await res.json();
+    if(json && json.error){
+      const err = new Error(json.error);
+      err.isApiError = true;
+      err.raw = json.error;
+      throw err;
+    }
+    return json;
+  }catch(err){
+    // Google Apps Script kabhi kabhi waqti (transient) taur par masroof/dheema ho sakta hai —
+    // is liye ek dafa khud-b-khud dobara koshish karte hain user ko error dikhane se pehle.
+    if(!_isRetry){
+      await new Promise(r=>setTimeout(r, 900));
+      return _apiCall(action, params, bodyObj, true);
+    }
     throw err;
   }
-  return json;
 }
 async function fsGet(col,id){
   try{ const r = await _apiCall('get', {col, id}); return r.data; }
