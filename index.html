@@ -223,6 +223,7 @@
       <div class="tab hidden" id="tabSubmitted" onclick="showAppTab('submitted')"><span class="ic">📥</span>جمع شدہ</div>
       <div class="tab hidden" id="tabVerified" onclick="showAppTab('verified')"><span class="ic">✅</span>تصدیق شدہ</div>
       <div class="tab hidden" id="tabAddUser" onclick="showAppTab('adduser')"><span class="ic">➕</span>نیا ذمہ دار</div>
+      <div class="tab hidden" id="tabAssignSup" onclick="showAppTab('assignsup')"><span class="ic">🎯</span>سپروائزر تفویض</div>
       <div class="tab" id="tabPdf" onclick="showAppTab('pdf')"><span class="ic">📄</span>PDF</div>
     </div>
 
@@ -519,6 +520,10 @@
       <div class="card-head"><span class="lbl">جمع شدہ سفری ریکارڈ (نظرثانی کے منتظر)</span></div>
       <div class="card-body">
         <div class="note">یہاں وہ تمام ماہانہ ریکارڈ نظر آئیں گے جو متعلقہ ذمہ داران نے جمع کروائے ہیں اور آپ کی نظرثانی کے منتظر ہیں۔ کسی بھی آئٹم پر ٹیپ کریں تاکہ اسے کھول کر چیک کریں۔</div>
+        <div style="display:flex;gap:10px;margin-bottom:10px;flex-wrap:wrap;">
+          <div class="field" style="flex:1;min-width:140px;"><label>مہینہ منتخب کریں</label><select id="submittedFilterMonth" onchange="renderSubmittedList()"></select></div>
+          <div class="field" style="width:110px;"><label>سال</label><input type="number" id="submittedFilterYear" onchange="renderSubmittedList()"></div>
+        </div>
         <div id="submittedList"></div>
       </div>
     </div>
@@ -528,6 +533,10 @@
       <div class="card-head"><span class="lbl">✅ تصدیق شدہ (حتمی منظور شدہ) سفری ریکارڈ</span></div>
       <div class="card-body">
         <div class="note">یہاں وہ تمام ماہانہ ریکارڈ ہیں جو حتمی طور پر منظور ہو چکے ہیں۔ ایک یا ایک سے زائد منتخب کر کے ایک ہی کلک میں PDF بنا سکتے ہیں۔</div>
+        <div style="display:flex;gap:10px;margin-bottom:10px;flex-wrap:wrap;">
+          <div class="field" style="flex:1;min-width:140px;"><label>مہینہ منتخب کریں</label><select id="verifiedFilterMonth" onchange="renderVerifiedList()"></select></div>
+          <div class="field" style="width:110px;"><label>سال</label><input type="number" id="verifiedFilterYear" onchange="renderVerifiedList()"></div>
+        </div>
         <div class="chk-line">
           <input type="checkbox" id="verifiedSelectAll" onchange="toggleSelectAllVerified()">
           <label for="verifiedSelectAll" style="margin:0;">سب منتخب کریں</label>
@@ -585,6 +594,20 @@
         <div class="note hidden" id="regMultiDistrictNote">اس عہدے کے لیے ایک سے زائد اضلاع دیے جا سکتے ہیں — کاما (,) سے الگ کر کے لکھیں، مثلاً: لاہور, ساہیوال, قصور</div>
         <div class="field"><label>شعبہ</label><input type="text" id="regDept" placeholder="مثلاً ڈونیشن بکس ڈیپارٹمنٹ"></div>
         <button class="btn-primary" id="registerBtn" onclick="adminCreateUser()">نئی آئی ڈی بنائیں</button>
+      </div>
+    </div>
+
+    <!-- SUPERVISOR ASSIGNMENT TAB (admin only) -->
+    <div class="card hidden" id="assignSupTab">
+      <div class="card-head"><span class="lbl">🎯 سپروائزر تفویض (Assign / Un-Assign)</span></div>
+      <div class="card-body">
+        <div class="note">پہلے ضلع منتخب کریں، پھر سپروائزر منتخب کریں — نیچے اُس ضلع کے تمام باکس ذمہ داران کی فہرست آ جائے گی۔ جو باکس ذمہ دار پہلے سے کسی اور سپروائزر کو تفویض ہے، اُس کا نام دھندلا (locked) نظر آئے گا — پہلے اُسے "ان اسائن" کریں، تب ہی نئے سپروائزر کو دے سکیں گے۔</div>
+        <div class="row2">
+          <div class="field"><label>ضلع منتخب کریں</label><select id="assignDistrictSel" onchange="onAssignDistrictChange()"><option value="">-- منتخب کریں --</option></select></div>
+          <div class="field"><label>سپروائزر منتخب کریں</label><select id="assignSupervisorSel" onchange="onAssignSupervisorChange()"><option value="">-- پہلے ضلع منتخب کریں --</option></select></div>
+        </div>
+        <div id="assignSupBoxList" style="margin-top:12px;"></div>
+        <button class="btn-primary" style="margin-top:12px;" onclick="saveDistrictAssignments()" id="assignSupSaveBtn" disabled>محفوظ کریں</button>
       </div>
     </div>
 
@@ -815,6 +838,19 @@ function isDivisionStaffRole(role){ return role==='division_reporting' || role==
 
 function fillMonthSelect(){ document.getElementById('pMonth').innerHTML=urduMonths.map((m,i)=>`<option value="${i}">${m}</option>`).join(''); }
 fillMonthSelect();
+// "جمع شدہ" اور "تصدیق شدہ" لسٹس کے لیے مہینہ فلٹر — ڈیفالٹ ہمیشہ "تمام مہینے" ہوتا ہے، یعنی پہلے جیسا ہی رویہ برقرار رہتا ہے جب تک کوئی خود کوئی مہینہ منتخب نہ کرے۔
+function fillMonthFilterSelect(id){
+  const el=document.getElementById(id);
+  if(!el) return;
+  el.innerHTML = '<option value="all">تمام مہینے</option>' + urduMonths.map((m,i)=>`<option value="${i}">${m}</option>`).join('');
+}
+fillMonthFilterSelect('submittedFilterMonth');
+fillMonthFilterSelect('verifiedFilterMonth');
+(function(){
+  const y = new Date().getFullYear();
+  const sy=document.getElementById('submittedFilterYear'); if(sy) sy.value=y;
+  const vy=document.getElementById('verifiedFilterYear'); if(vy) vy.value=y;
+})();
 
 function localDateStr(dateObj){
   const y=dateObj.getFullYear(), m=String(dateObj.getMonth()+1).padStart(2,'0'), d=String(dateObj.getDate()).padStart(2,'0');
@@ -1051,6 +1087,7 @@ async function enterApp(landingTab){
   document.getElementById('tabSubmitted').classList.toggle('hidden', hasNoSubs);
   document.getElementById('tabVerified').classList.toggle('hidden', hasNoSubs);
   document.getElementById('tabAddUser').classList.toggle('hidden', currentUser.role!=='admin');
+  document.getElementById('tabAssignSup').classList.toggle('hidden', currentUser.role!=='admin');
   try{
     await Promise.all([ loadProfileIntoForm(), loadSlabsIntoForm(), refreshOrgNameLabel() ]);
   }catch(e){
@@ -1181,6 +1218,101 @@ async function saveAssignedBoxes(){
     viewingUserObj.assignedBoxCodes = codes;
   } else toast('محفوظ کرنے میں خرابی');
 }
+
+/* ---------------- SUPERVISOR ASSIGNMENT TAB (admin only) — district-scoped assign/un-assign ----------------
+   Yeh wahi "assignedBoxCodes" field استعمال کرتا ہے جو اوپر والا per-supervisor assign section استعمال
+   کرتا ہے — دونوں ہمیشہ ہم آہنگ (in sync) رہتے ہیں۔ Naya faida: ek jagah se poore district ka jaiza,
+   aur ek baar kisi supervisor ko assign ho jane wale box zimedar ko doosre supervisor ke liye
+   khud-ba-khud "locked" dikhata hai jab tak pehle un-assign na ho. */
+async function initAssignSupTab(){
+  const all = await getAllUsers();
+  const rawDistricts = [...new Set(all.flatMap(u=> (Array.isArray(u.districts)&&u.districts.length)?u.districts:(u.district?[u.district]:[]) ))].filter(Boolean).sort();
+  const sel = document.getElementById('assignDistrictSel');
+  const prevDistrict = sel.value;
+  sel.innerHTML = '<option value="">-- منتخب کریں --</option>' + rawDistricts.map(d=>`<option value="${d}">${d}</option>`).join('');
+  if(prevDistrict && rawDistricts.includes(prevDistrict)){
+    sel.value = prevDistrict;
+    await onAssignDistrictChange(true);
+  } else {
+    document.getElementById('assignSupervisorSel').innerHTML = '<option value="">-- پہلے ضلع منتخب کریں --</option>';
+    document.getElementById('assignSupBoxList').innerHTML = '';
+    document.getElementById('assignSupSaveBtn').disabled = true;
+  }
+}
+async function onAssignDistrictChange(keepSupervisor){
+  const district = document.getElementById('assignDistrictSel').value;
+  const supSel = document.getElementById('assignSupervisorSel');
+  const prevSup = keepSupervisor ? supSel.value : '';
+  document.getElementById('assignSupBoxList').innerHTML='';
+  document.getElementById('assignSupSaveBtn').disabled = true;
+  if(!district){ supSel.innerHTML = '<option value="">-- پہلے ضلع منتخب کریں --</option>'; return; }
+  const all = await getAllUsers();
+  const dNorm = normLoc(district);
+  const sups = all.filter(u=>u.role==='supervisor' && u.status!=='closed' && userDistricts(u).includes(dNorm)).sort((a,b)=>a.name.localeCompare(b.name));
+  supSel.innerHTML = '<option value="">-- منتخب کریں --</option>' + sups.map(u=>`<option value="${u.code}">${u.name}</option>`).join('');
+  if(!sups.length){
+    document.getElementById('assignSupBoxList').innerHTML = '<div class="empty">اس ضلع میں کوئی سپروائزر رجسٹرڈ نہیں۔ پہلے "نیا ذمہ دار" سے سپروائزر بنائیں۔</div>';
+    return;
+  }
+  if(prevSup && sups.some(s=>s.code===prevSup)){ supSel.value=prevSup; await renderAssignSupBoxList(); }
+}
+async function onAssignSupervisorChange(){
+  await renderAssignSupBoxList();
+}
+async function renderAssignSupBoxList(){
+  const district = document.getElementById('assignDistrictSel').value;
+  const supCode = document.getElementById('assignSupervisorSel').value;
+  const listEl = document.getElementById('assignSupBoxList');
+  const saveBtn = document.getElementById('assignSupSaveBtn');
+  if(!district || !supCode){ listEl.innerHTML=''; saveBtn.disabled=true; return; }
+  listEl.innerHTML = '<div class="empty">لوڈ ہو رہا ہے...</div>';
+  const all = await getAllUsers();
+  const dNorm = normLoc(district);
+  const boxUsers = all.filter(u=>u.role==='box' && u.status!=='closed' && userDistricts(u).includes(dNorm)).sort((a,b)=>a.name.localeCompare(b.name));
+  if(!boxUsers.length){ listEl.innerHTML='<div class="empty">اس ضلع میں کوئی باکس ذمہ دار رجسٹرڈ نہیں۔</div>'; saveBtn.disabled=true; return; }
+
+  const allSupervisors = all.filter(u=>u.role==='supervisor');
+  const assignedToMap = {}; // boxCode -> {code,name} of whichever supervisor currently has them
+  allSupervisors.forEach(s=>{ (s.assignedBoxCodes||[]).forEach(bc=>{ assignedToMap[bc] = {code:s.code, name:s.name}; }); });
+
+  listEl.innerHTML = boxUsers.map(u=>{
+    const assignedTo = assignedToMap[u.code];
+    if(assignedTo && assignedTo.code!==supCode){
+      return `<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;padding:6px 0;border-bottom:1px dashed var(--line);font-size:13px;opacity:0.75;">
+        <span>${u.name} (${u.code}) — <span style="color:var(--danger);">پہلے سے "${assignedTo.name}" کو تفویض 🔒</span></span>
+        <button class="btn-ghost btn-sm" onclick="unassignBoxDirect('${u.code}','${assignedTo.code}')">ان اسائن کریں</button>
+      </div>`;
+    }
+    const checked = assignedTo && assignedTo.code===supCode;
+    return `<label style="display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px dashed var(--line);font-size:13px;cursor:pointer;">
+      <input type="checkbox" class="assign-sup-box-check" value="${u.code}" ${checked?'checked':''}>
+      <span>${u.name} (${u.code})</span>
+    </label>`;
+  }).join('');
+  saveBtn.disabled = false;
+}
+async function saveDistrictAssignments(){
+  const supCode = document.getElementById('assignSupervisorSel').value;
+  if(!supCode){ toast('پہلے سپروائزر منتخب کریں'); return; }
+  const codes = Array.from(document.querySelectorAll('.assign-sup-box-check:checked')).map(el=>el.value);
+  const userDoc = await fsGet('users', supCode);
+  if(!userDoc){ toast('سپروائزر کا ریکارڈ نہیں ملا'); return; }
+  userDoc.assignedBoxCodes = codes;
+  const ok = await fsSet('users', supCode, userDoc);
+  if(ok){ toast('Assignment محفوظ ہو گئی ✓ ('+codes.length+' باکس ذمہ دار منتخب)'); renderAssignSupBoxList(); }
+  else toast('محفوظ کرنے میں خرابی');
+}
+async function unassignBoxDirect(boxCode, fromSupervisorCode){
+  const sure = confirm('کیا آپ اس باکس ذمہ دار کو موجودہ سپروائزر سے ان اسائن کرنا چاہتے ہیں؟');
+  if(!sure) return;
+  const userDoc = await fsGet('users', fromSupervisorCode);
+  if(!userDoc){ toast('ریکارڈ نہیں ملا'); return; }
+  userDoc.assignedBoxCodes = (userDoc.assignedBoxCodes||[]).filter(c=>c!==boxCode);
+  const ok = await fsSet('users', fromSupervisorCode, userDoc);
+  if(ok){ toast('ان اسائن ہو گیا ✓'); renderAssignSupBoxList(); }
+  else toast('محفوظ کرنے میں خرابی');
+}
+
 function getProfileFromForm(){
   return {
     name: viewingUserObj ? viewingUserObj.name : currentUser.name,
@@ -1349,6 +1481,7 @@ async function saveProfileData(){
       document.getElementById('tabSubmitted').classList.toggle('hidden', hasNoSubs);
       document.getElementById('tabVerified').classList.toggle('hidden', hasNoSubs);
       document.getElementById('tabAddUser').classList.toggle('hidden', currentUser.role!=='admin');
+      document.getElementById('tabAssignSup').classList.toggle('hidden', currentUser.role!=='admin');
     }
     if(viewingUserObj && viewingUserObj.code===code){
       viewingUserObj.name=name;
@@ -1568,7 +1701,7 @@ async function renderRateBreakdownPreview(){
 
 /* ---------------- tabs ---------------- */
 function showAppTab(which){
-  ['Dashboard','Profile','Petrol','Daily','Sub','Submitted','Verified','AddUser','Pdf'].forEach(t=>{
+  ['Dashboard','Profile','Petrol','Daily','Sub','Submitted','Verified','AddUser','AssignSup','Pdf'].forEach(t=>{
     const el=document.getElementById('tab'+t);
     if(el) el.classList.toggle('active', t.toLowerCase()===which);
   });
@@ -1580,6 +1713,7 @@ function showAppTab(which){
   document.getElementById('submittedTab').classList.toggle('hidden', which!=='submitted');
   document.getElementById('verifiedTab').classList.toggle('hidden', which!=='verified');
   document.getElementById('addUserTab').classList.toggle('hidden', which!=='adduser');
+  document.getElementById('assignSupTab').classList.toggle('hidden', which!=='assignsup');
   document.getElementById('dangerZoneCard').classList.toggle('hidden', which!=='adduser');
   document.getElementById('pdfTab').classList.toggle('hidden', which!=='pdf');
   if(which==='dashboard'){
@@ -1604,6 +1738,7 @@ function showAppTab(which){
     setupDoProfilePicker();
   }
   if(which==='adduser'){ resetAddUserForm(); populateLocationDatalists(); }
+  if(which==='assignsup'){ initAssignSupTab(); }
   updateSubmittedBadgeCount();
   saveLastTab(which);
 }
@@ -1781,7 +1916,15 @@ async function renderSubmittedList(){
   const subs = await getSubordinates();
   const subMap={}; subs.forEach(u=>subMap[u.code]=u);
   const allSubmitted = await fsListWhere('approvals','status','submitted');
-  const relevant = allSubmitted.filter(a=>subMap[a.code] && isRelevantSubmittedStage(a));
+  let relevant = allSubmitted.filter(a=>subMap[a.code] && isRelevantSubmittedStage(a));
+  const fMonthEl=document.getElementById('submittedFilterMonth');
+  const fYearEl=document.getElementById('submittedFilterYear');
+  const fMonth = fMonthEl ? fMonthEl.value : 'all';
+  const fYear = fYearEl && fYearEl.value ? parseInt(fYearEl.value,10) : null;
+  if(fMonth!=='all'){
+    const mNum=parseInt(fMonth,10);
+    relevant = relevant.filter(a=> a.month===mNum && (!fYear || a.year===fYear));
+  }
   if(!relevant.length){ box.innerHTML='<div class="empty">فی الحال کوئی نیا جمع شدہ سفری ریکارڈ موجود نہیں۔</div>'; return; }
   relevant.sort((a,b)=> new Date(b.at)-new Date(a.at));
   box.innerHTML = relevant.map(a=>{
@@ -1852,7 +1995,15 @@ async function renderVerifiedList(){
   const allSubmitted = await fsListWhere('approvals','status','submitted');
   const awaitingItems = allSubmitted.filter(a=>subMap[a.code] && isAwaitingFinanceStage(a)).map(a=>({...a,_kind:'awaiting_finance'}));
 
-  const relevant = [...awaitingItems, ...approvedItems];
+  let relevant = [...awaitingItems, ...approvedItems];
+  const fMonthEl=document.getElementById('verifiedFilterMonth');
+  const fYearEl=document.getElementById('verifiedFilterYear');
+  const fMonth = fMonthEl ? fMonthEl.value : 'all';
+  const fYear = fYearEl && fYearEl.value ? parseInt(fYearEl.value,10) : null;
+  if(fMonth!=='all'){
+    const mNum=parseInt(fMonth,10);
+    relevant = relevant.filter(a=> a.month===mNum && (!fYear || a.year===fYear));
+  }
   if(!relevant.length){ box.innerHTML='<div class="empty">فی الحال کوئی تصدیق شدہ سفری ریکارڈ موجود نہیں۔</div>'; return; }
   relevant.sort((a,b)=> new Date(b.at)-new Date(a.at));
   box.innerHTML = relevant.map(a=>{
@@ -3480,7 +3631,9 @@ Object.assign(window, {
   openDayEditor, toggleDayEditor, onMeterChange, closeDayEditor, saveDayEntry, addRemark,
   changeOwnPin, resetSubordinatePin, toggleAccountStatus, editOrgName, approveCurrentStage, sendBackCurrentStage, submitMonth, filterSubList,
   generateAndDownloadPdf, shareWhatsApp, renderDaysList, populateLocationDatalists,
-  onAdminPickRoleChange, onAdminPickUserChange, backToOwnFromPicker, toggleSelectAllSub, bulkLockProfiles, confirmMailedToFinance, adminClearMonthEntries, renderDistrictReport, migrateOldSubmittedStages, verifyMemberProfile, adminDeletePhotos, switchDoProfileMode, filterDoProfileList, selectDoProfile, filterAdminSearchList, selectAdminSearchResult, markSentToBank
+  onAdminPickRoleChange, onAdminPickUserChange, backToOwnFromPicker, toggleSelectAllSub, bulkLockProfiles, confirmMailedToFinance, adminClearMonthEntries, renderDistrictReport, migrateOldSubmittedStages, verifyMemberProfile, adminDeletePhotos, switchDoProfileMode, filterDoProfileList, selectDoProfile, filterAdminSearchList, selectAdminSearchResult, markSentToBank,
+  renderSubmittedList, renderVerifiedList,
+  initAssignSupTab, onAssignDistrictChange, onAssignSupervisorChange, saveDistrictAssignments, unassignBoxDirect
 });
 </script>
 </body>
