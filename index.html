@@ -292,6 +292,7 @@
               <option value="division_fundraiser">ڈویژن فنڈریزر ذمہ دار</option>
               <option value="division_coordinator">ڈویژن کوآرڈینیٹر</option>
               <option value="finance">فنانس ذمہ دار</option>
+                  <option value="auditor">آڈیٹر</option>
                   <option value="admin">ایڈمن</option>
                 </select>
               </div>
@@ -497,6 +498,7 @@
               <option value="division_fundraiser">ڈویژن فنڈریزر ذمہ دار</option>
               <option value="division_coordinator">ڈویژن کوآرڈینیٹر</option>
               <option value="finance">فنانس ذمہ دار</option>
+              <option value="auditor">آڈیٹر</option>
               <option value="admin">ایڈمن</option>
             </select>
           </div>
@@ -869,6 +871,9 @@ function localDateStr(dateObj){
 }
 function parseLocalDate(dateStr){ const [y,m,d]=dateStr.split('-').map(Number); return new Date(y,m-1,d); }
 function fmtNum(n){ return (Math.round((n||0)*100)/100).toLocaleString('en-US'); }
+// "حتمی" (final) رقوم (پٹرول، مینٹینس، بل، خالص ادائیگی) کے لیے — پوائنٹ کے بعد کے ہندسے ہٹا کر
+// قریب ترین پورے روپے تک راؤنڈ آف کر کے دکھاتا ہے (مثلاً 127.25 → 127)۔
+function fmtNumRound(n){ return Math.round(n||0).toLocaleString('en-US'); }
 
 let currentUser=null;
 let currentSlabs=[];
@@ -3016,14 +3021,16 @@ function buildPdfFromJpeg(jpegDataUrl, pxWidth, pxHeight){
 const LEDGER_COLS = [
   {key:'date', label:'تاریخ', w:90},
   {key:'day', label:'دن', w:66},
-  {key:'activity', label:'مصروفیت کی تفصیل', w:165},
-  {key:'travel', label:'سفرکی تفصیل', w:230},
+  {key:'activity', label:'مصروفیت کی تفصیل', w:245},
+  {key:'travel', label:'سفرکی تفصیل', w:330},
   {key:'meterStart', label:'میٹر ابتدا', w:86},
   {key:'meterEnd', label:'میٹر انتہا', w:86},
   {key:'km', label:'کلومیٹر', w:76},
   {key:'fare', label:'کرایہ', w:82},
-  {key:'maintenance', label:'مینٹینس', w:86},
 ];
+// نوٹ: "مینٹینس" اب ہر دن کی سطر میں الگ کالم کے طور پر نہیں دکھائی جاتی — صرف نیچے خلاصے میں
+// "پٹرول خرچہ" کے عین نیچے "کل مینٹینس" کے طور پر ایک ہی مجموعی ہندسہ دکھایا جاتا ہے (دیکھیں footRows1)۔
+// خالی ہونے والی جگہ اوپر "مصروفیت کی تفصیل" اور "سفرکی تفصیل" کالمز کو دی گئی ہے تاکہ تفصیل زیادہ صاف نظر آئے۔
 
 const LEDGER_FONT_FAMILY = "'Noto Nastaliq Urdu','Jameel Noori Nastaleeq','Noto Naskh Arabic',Tahoma,sans-serif";
 // Sets ctx.font to the largest size (down to a sensible minimum) that fits `text` within `maxWidth`.
@@ -3198,7 +3205,7 @@ async function drawLedgerCanvas(overrideCode, overrideYear, overrideMonth){
   const refLineH = 0; // reference/status line removed per request
   const infoBlockH = 115;
   const footerH = 90;
-  const sigH = 130;
+  const sigH = 150;
   const tableH = headerRowH + Math.max(1,data.rows.length)*rowH + rowH;
   const rbRows = Math.max(1, data.rateBreakdown.length);
   const rateBreakdownH = 20 + (headerRowH-4) + rbRows*rowH + 10;
@@ -3309,7 +3316,7 @@ async function drawLedgerCanvas(overrideCode, overrideYear, overrideMonth){
         const xLeft = xRight - col.w;
         ctx.strokeStyle='#ddd'; ctx.strokeRect(xLeft, y, col.w, rowH);
         let val = row[col.key];
-        if(col.key==='fare'||col.key==='maintenance'){ val = (val===''?'':fmtNum(val)); }
+        if(col.key==='fare'){ val = (val===''?'':fmtNum(val)); }
         ctx.fillStyle='#000';
         const isDetail = (col.key==='travel'||col.key==='activity');
         ctx.textAlign = isDetail ? 'right' : 'center';
@@ -3326,7 +3333,7 @@ async function drawLedgerCanvas(overrideCode, overrideYear, overrideMonth){
   // totals row
   xRight = pageWidth - margin;
   ctx.font="bold 12px 'Noto Nastaliq Urdu','Jameel Noori Nastaleeq','Noto Naskh Arabic',Tahoma,sans-serif";
-  const totalsColVals = {km:fmtNum(data.totalKm), fare:fmtNum(data.totalFare), maintenance:fmtNum(data.totalMaintenance)};
+  const totalsColVals = {km:fmtNumRound(data.totalKm), fare:fmtNumRound(data.totalFare)};
   let firstSixWidth=0;
   LEDGER_COLS.forEach((col,i)=>{ if(i<6) firstSixWidth+=col.w; });
   ctx.fillStyle='#F1E9D6'; ctx.fillRect(xRight-firstSixWidth, y, firstSixWidth, rowH);
@@ -3392,8 +3399,8 @@ async function drawLedgerCanvas(overrideCode, overrideYear, overrideMonth){
 
   // footer summary: two boxes side by side
   const footBoxW=(pageWidth-margin*2-10)/2;
-  const footRows1=[['پٹرول خرچہ',fmtNum(data.totalPetrol)],['مینٹینس (کل)',fmtNum(data.totalMaintenance)],['ٹوٹل بل',fmtNum(data.totalBill)]];
-  const footRows2=[['احتیاطی کٹوتی',fmtNum(data.monthlyDeduction)],['کرایہ',fmtNum(data.totalFare)],['کل ادائیگی (Net)',fmtNum(data.netPayable)]];
+  const footRows1=[['پٹرول خرچہ',fmtNumRound(data.totalPetrol)],['مینٹینس (کل)',fmtNumRound(data.totalMaintenance)],['ٹوٹل بل',fmtNumRound(data.totalBill)]];
+  const footRows2=[['احتیاطی کٹوتی',fmtNumRound(data.monthlyDeduction)],['کرایہ',fmtNumRound(data.totalFare)],['کل ادائیگی (Net)',fmtNumRound(data.netPayable)]];
   const footRowH=24;
   ctx.font="13px 'Noto Nastaliq Urdu','Jameel Noori Nastaleeq','Noto Naskh Arabic',Tahoma,sans-serif";
   [footRows1, footRows2].forEach((box, bi)=>{
@@ -3421,26 +3428,28 @@ async function drawLedgerCanvas(overrideCode, overrideYear, overrideMonth){
       ctx.lineWidth=1;
     });
   });
-  y += footRowH*3 + 70;
+  y += footRowH*3 + 85;
 
   // signatures (draws captured digital signature images above the line, when available)
   ctx.font="12px 'Noto Nastaliq Urdu','Jameel Noori Nastaleeq','Noto Naskh Arabic',Tahoma,sans-serif";
   ctx.textAlign='center';
   const sigLabels=['دستخط ذمہ دار', firstCheckerLabel, 'دستخط فنانس'];
   const sigImages=[zimmedarSigImg, supervisorSigImg, null];
-  const sigW=130;
-  const sigBoxW=sigW-20, sigBoxH=38;
+  const sigW=155;
+  const sigBoxW=sigW-15, sigBoxH=56;
   const totalSigW=sigW*3+40*2;
   let sigX = pageWidth/2 + totalSigW/2 - sigW;
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = 'high';
   for(let i=0;i<sigLabels.length;i++){
     const img = sigImages[i];
     const boxX = sigX - sigBoxW/2, boxY = y - sigBoxH - 8;
-    ctx.strokeStyle='#ccc'; ctx.lineWidth=1;
+    ctx.strokeStyle='#999'; ctx.lineWidth=1.3;
     ctx.strokeRect(boxX, boxY, sigBoxW, sigBoxH);
     if(img){
       ctx.save();
       ctx.beginPath(); ctx.rect(boxX+2, boxY+2, sigBoxW-4, sigBoxH-4); ctx.clip();
-      const fitScale = Math.min((sigBoxW-6)/img.width, (sigBoxH-6)/img.height);
+      const fitScale = Math.min((sigBoxW-8)/img.width, (sigBoxH-8)/img.height);
       const drawW = img.width*fitScale, drawH = img.height*fitScale;
       ctx.drawImage(img, boxX+(sigBoxW-drawW)/2, boxY+(sigBoxH-drawH)/2, drawW, drawH);
       ctx.restore();
