@@ -334,6 +334,7 @@
               <option value="division_fundraiser">ڈویژن فنڈریزر ذمہ دار</option>
               <option value="division_coordinator">ڈویژن کوآرڈینیٹر</option>
               <option value="finance">فنانس ذمہ دار</option>
+              <option value="auditor">آڈیٹر</option>
               <option value="admin">ایڈمن</option>
             </select>
           </div>
@@ -584,6 +585,7 @@
               <option value="division_fundraiser">ڈویژن فنڈریزر ذمہ دار</option>
               <option value="division_coordinator">ڈویژن کوآرڈینیٹر</option>
               <option value="finance">فنانس ذمہ دار</option>
+            <option value="auditor">آڈیٹر</option>
             <option value="admin">ایڈمن</option>
           </select>
         </div>
@@ -826,15 +828,24 @@ const ROLE_LABELS={
   district_office:'ڈسٹرکٹ آفس ذمہ دار', district:'ڈسٹرکٹ ذمہ دار',
   division:'ڈویژن ذمہ دار', division_reporting:'ڈویژن رپورٹنگ منیجر', division_repairing:'ڈویژن ریپیئرنگ ذمہ دار',
   division_fundraiser:'ڈویژن فنڈریزر ذمہ دار', division_coordinator:'ڈویژن کوآرڈینیٹر',
-  finance:'فنانس ذمہ دار',
+  finance:'فنانس ذمہ دار', auditor:'آڈیٹر',
   admin:'ایڈمن'
 };
-const ROLE_GRADE={ box:1, supervisor:2, district_office:3, district:4, division:5, division_reporting:4, division_repairing:4, division_fundraiser:4, division_coordinator:4, finance:6, admin:6 };
+const ROLE_GRADE={ box:1, supervisor:2, district_office:3, district:4, division:5, division_reporting:4, division_repairing:4, division_fundraiser:4, division_coordinator:4, finance:6, admin:6, auditor:2 };
 // Only the true division-scope checker (division zimedar) is exempt from needing a district and has no district field.
 // division_reporting/division_repairing/division_fundraiser/division_coordinator are district-assigned staff whose
 // verified safar routes to THAT district's district_office zimedar — see determineCheckerStage() below.
 function isDivisionLevelRole(role){ return role==='division'; }
 function isDivisionStaffRole(role){ return role==='division_reporting' || role==='division_repairing' || role==='division_fundraiser' || role==='division_coordinator'; }
+// "box" aur "auditor" sirf apna record bharte hain (kisi ko check nahi karte)۔ division_reporting/repairing/
+// fundraiser bhi kisi ko check nahi karte، lekin division_coordinator ab Auditors ko check karta hai، is liye
+// usay is list se istisna (exempt) rakha gaya hai۔
+function roleHasNoSubordinateDuty(role){
+  const r = role||'box';
+  if(r==='box' || r==='auditor') return true;
+  if(r==='division_coordinator') return false;
+  return isDivisionStaffRole(r);
+}
 
 function fillMonthSelect(){ document.getElementById('pMonth').innerHTML=urduMonths.map((m,i)=>`<option value="${i}">${m}</option>`).join(''); }
 fillMonthSelect();
@@ -1082,7 +1093,7 @@ async function enterApp(landingTab){
   document.getElementById('authScreen').classList.add('hidden');
   document.getElementById('appScreen').classList.remove('hidden');
   renderTopUserChip();
-  const hasNoSubs = (currentUser.role||'box')==='box' || isDivisionStaffRole(currentUser.role);
+  const hasNoSubs = roleHasNoSubordinateDuty(currentUser.role);
   document.getElementById('tabSub').classList.toggle('hidden', hasNoSubs);
   document.getElementById('tabSubmitted').classList.toggle('hidden', hasNoSubs);
   document.getElementById('tabVerified').classList.toggle('hidden', hasNoSubs);
@@ -1476,7 +1487,7 @@ async function saveProfileData(){
       currentUser.name = name;
       if(isAdmin) currentUser.role = userDoc.role;
       renderTopUserChip();
-      const hasNoSubs = (currentUser.role||'box')==='box' || isDivisionStaffRole(currentUser.role);
+      const hasNoSubs = roleHasNoSubordinateDuty(currentUser.role);
       document.getElementById('tabSub').classList.toggle('hidden', hasNoSubs);
       document.getElementById('tabSubmitted').classList.toggle('hidden', hasNoSubs);
       document.getElementById('tabVerified').classList.toggle('hidden', hasNoSubs);
@@ -1770,6 +1781,7 @@ async function determineCheckerStage(role, code){
     const hasSupervisor = all.some(u=> u.role==='supervisor' && u.status!=='closed' && Array.isArray(u.assignedBoxCodes) && u.assignedBoxCodes.includes(code));
     return hasSupervisor ? 'supervisor' : 'district';
   }
+  if(role==='auditor') return 'division_coordinator';
   if(role==='supervisor' || role==='district_office') return 'district';
   if(role==='district' || isDivisionStaffRole(role)) return 'division';
   return 'district'; // sensible fallback (e.g. admin submitting on someone's behalf)
@@ -1779,7 +1791,17 @@ async function getSubordinates(){
   const allWithSelf=await getAllUsers();
   const all=allWithSelf.filter(u=>u.code!==currentUser.code);
   if(role==='admin' || role==='finance') return all;
-  if(isDivisionStaffRole(role)) return []; // division_reporting/repairing/fundraiser/coordinator don't check anyone
+  if(role==='division_coordinator'){
+    // Division Coordinator ek hi hota hai (poori organization ke liye, district-wise alag nahi) — is liye
+    // yeh HAR district ke Auditors ka safar check karta hai (district-filter yahan lagana nahi hai)۔
+    // Approve hone ke baad yeh record khud-b-khud us Auditor ke APNE district ke District Office Zimedar ke
+    // paas chala jata hai (neeche "district_office" wala hissa district se hi match karta hai, jo pehle se
+    // theek kaam kar raha hai — is liye is agle marhale ko chhera nahi)۔
+    // Baqi division-staff duties (division_reporting/repairing/fundraiser) mein koi tabdeeli nahi — un ka
+    // apna kaam abhi bhi kisi ko check karna nahi hai۔
+    return all.filter(u=> u.role==='auditor' && u.status!=='closed');
+  }
+  if(isDivisionStaffRole(role)) return []; // division_reporting/repairing/fundraiser don't check anyone
   if(role==='division'){
     return all.filter(u=> (u.role==='district'||isDivisionStaffRole(u.role)) && normLoc(u.division)===normLoc(currentUser.division) && normLoc(u.division)!=='');
   }
@@ -1895,13 +1917,14 @@ async function backToOwn(){
 
 /* ---------------- submitted items (awaiting review, across all subordinates) ---------------- */
 function isRelevantSubmittedStage(a){
-  // "جمع شدہ" shows items waiting on THIS viewer's own checking duty (supervisor/district/division stage).
+  // "جمع شدہ" shows items waiting on THIS viewer's own checking duty (supervisor/district/division/division_coordinator stage).
   // Once checked, it moves to stage 'district_office' — visible in "تصدیق شدہ" instead (see isAwaitingFinanceStage).
   const myRole = currentUser.role||'box';
   if(myRole==='supervisor') return a.stage==='supervisor';
   if(myRole==='district') return a.stage==='district';
   if(myRole==='division') return a.stage==='division';
-  if(myRole==='admin') return ['supervisor','district','division'].includes(a.stage);
+  if(myRole==='division_coordinator') return a.stage==='division_coordinator';
+  if(myRole==='admin') return ['supervisor','district','division','division_coordinator'].includes(a.stage);
   return false;
 }
 function isAwaitingFinanceStage(a){
@@ -2300,6 +2323,7 @@ function stageLabel(stage){
   if(stage==='supervisor') return 'سپروائزر';
   if(stage==='district') return 'ڈسٹرکٹ ذمہ دار';
   if(stage==='division') return 'ڈویژن ذمہ دار';
+  if(stage==='division_coordinator') return 'ڈویژن کوآرڈینیٹر';
   if(stage==='district_office') return 'ڈسٹرکٹ آفس ذمہ دار';
   if(stage==='done') return 'مکمل';
   return stage||'';
