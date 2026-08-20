@@ -144,6 +144,7 @@
   .modal-overlay{display:flex;align-items:center;justify-content:center;}
   @keyframes spin{to{transform:rotate(360deg);}}
 </style>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 </head>
 <body>
 <div id="bootLoadingOverlay" style="position:fixed;inset:0;background:#EEF1EC;z-index:999999;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;">
@@ -526,6 +527,7 @@
         <div style="display:flex;gap:10px;margin-bottom:10px;flex-wrap:wrap;">
           <div class="field" style="flex:1;min-width:140px;"><label>مہینہ منتخب کریں</label><select id="submittedFilterMonth" onchange="renderSubmittedList()"></select></div>
           <div class="field" style="width:110px;"><label>سال</label><input type="number" id="submittedFilterYear" onchange="renderSubmittedList()"></div>
+          <div class="field hidden" id="submittedDistrictWrap" style="flex:1;min-width:160px;"><label>ضلع منتخب کریں (اختیاری)</label><select id="submittedFilterDistrict" onchange="renderSubmittedList()"><option value="">-- تمام اضلاع --</option></select></div>
         </div>
         <div id="submittedList"></div>
       </div>
@@ -539,6 +541,7 @@
         <div style="display:flex;gap:10px;margin-bottom:10px;flex-wrap:wrap;">
           <div class="field" style="flex:1;min-width:140px;"><label>مہینہ منتخب کریں</label><select id="verifiedFilterMonth" onchange="renderVerifiedList()"></select></div>
           <div class="field" style="width:110px;"><label>سال</label><input type="number" id="verifiedFilterYear" onchange="renderVerifiedList()"></div>
+          <div class="field hidden" id="verifiedDistrictWrap" style="flex:1;min-width:160px;"><label>ضلع منتخب کریں (اختیاری)</label><select id="verifiedFilterDistrict" onchange="renderVerifiedList()"><option value="">-- تمام اضلاع --</option></select></div>
         </div>
         <div class="chk-line">
           <input type="checkbox" id="verifiedSelectAll" onchange="toggleSelectAllVerified()">
@@ -547,6 +550,8 @@
         <div id="verifiedList"></div>
         <button class="btn-primary" style="margin-top:12px;" onclick="bulkDownloadVerifiedPdf()">📄 منتخب شدہ کی PDF ڈاؤن لوڈ کریں</button>
         <div class="note" id="bulkPdfStatusNote"></div>
+        <button class="btn-primary hidden" id="districtExcelBtn" style="margin-top:12px;background:#1a6e3c;" onclick="downloadDistrictExcelSummary()">📊 ضلع کی مکمل Excel فائل ڈاؤن لوڈ کریں</button>
+        <div class="note" id="districtExcelStatusNote"></div>
       </div>
     </div>
 
@@ -1938,9 +1943,24 @@ function isAwaitingFinanceStage(a){
   if(a.stage!=='district_office') return false;
   return myRole==='district_office' || myRole==='admin';
 }
+// Sirf Admin ke liye "جمع شدہ"/"تصدیق شدہ" tabs mein ضلع فلٹر دکھاتا/بھرتا ہے (باقی سب کے لیے چھپا رہتا ہے،
+// ان کا اپنا ڈیٹا ویسے ہی صرف ان کے دائرہ اختیار تک محدود ہوتا ہے)۔
+async function populateAdminDistrictFilter(selectId, wrapId){
+  const wrap = document.getElementById(wrapId);
+  const isAdmin = (currentUser.role||'box')==='admin';
+  wrap.classList.toggle('hidden', !isAdmin);
+  if(!isAdmin) return;
+  const sel = document.getElementById(selectId);
+  if(sel.dataset.populated==='1') return; // ایک سیشن میں ایک بار کافی ہے
+  const all = await getAllUsers();
+  const rawDistricts = [...new Set(all.flatMap(u=> (Array.isArray(u.districts)&&u.districts.length)?u.districts:(u.district?[u.district]:[]) ))].filter(Boolean).sort();
+  sel.innerHTML = '<option value="">-- تمام اضلاع --</option>' + rawDistricts.map(d=>`<option value="${d}">${d}</option>`).join('');
+  sel.dataset.populated='1';
+}
 async function renderSubmittedList(){
   const box=document.getElementById('submittedList');
   box.innerHTML='<div class="empty">لوڈ ہو رہا ہے...</div>';
+  await populateAdminDistrictFilter('submittedFilterDistrict','submittedDistrictWrap');
   const subs = await getSubordinates();
   const subMap={}; subs.forEach(u=>subMap[u.code]=u);
   const allSubmitted = await fsListWhere('approvals','status','submitted');
@@ -1952,6 +1972,12 @@ async function renderSubmittedList(){
   if(fMonth!=='all'){
     const mNum=parseInt(fMonth,10);
     relevant = relevant.filter(a=> a.month===mNum && (!fYear || a.year===fYear));
+  }
+  const fDistrictEl=document.getElementById('submittedFilterDistrict');
+  const fDistrict = fDistrictEl ? fDistrictEl.value : '';
+  if(fDistrict){
+    const dNorm=normLoc(fDistrict);
+    relevant = relevant.filter(a=>{ const u=subMap[a.code]; return u && userDistricts(u).includes(dNorm); });
   }
   if(!relevant.length){ box.innerHTML='<div class="empty">فی الحال کوئی نیا جمع شدہ سفری ریکارڈ موجود نہیں۔</div>'; return; }
   relevant.sort((a,b)=> new Date(b.at)-new Date(a.at));
@@ -2014,6 +2040,10 @@ async function renderVerifiedList(){
   box.innerHTML='<div class="empty">لوڈ ہو رہا ہے...</div>';
   document.getElementById('verifiedSelectAll').checked=false;
   document.getElementById('bulkPdfStatusNote').textContent='';
+  const myRole = currentUser.role||'box';
+  document.getElementById('districtExcelBtn').classList.toggle('hidden', !(myRole==='district_office' || myRole==='admin'));
+  document.getElementById('districtExcelStatusNote').textContent='';
+  await populateAdminDistrictFilter('verifiedFilterDistrict','verifiedDistrictWrap');
   const subs = await getSubordinates();
   const subMap={}; subs.forEach(u=>subMap[u.code]=u);
 
@@ -2031,6 +2061,12 @@ async function renderVerifiedList(){
   if(fMonth!=='all'){
     const mNum=parseInt(fMonth,10);
     relevant = relevant.filter(a=> a.month===mNum && (!fYear || a.year===fYear));
+  }
+  const fDistrictEl=document.getElementById('verifiedFilterDistrict');
+  const fDistrict = fDistrictEl ? fDistrictEl.value : '';
+  if(fDistrict){
+    const dNorm=normLoc(fDistrict);
+    relevant = relevant.filter(a=>{ const u=subMap[a.code]; return u && userDistricts(u).includes(dNorm); });
   }
   if(!relevant.length){ box.innerHTML='<div class="empty">فی الحال کوئی تصدیق شدہ سفری ریکارڈ موجود نہیں۔</div>'; return; }
   relevant.sort((a,b)=> new Date(b.at)-new Date(a.at));
@@ -2133,6 +2169,99 @@ async function bulkDownloadVerifiedPdf(){
   setTimeout(()=>URL.revokeObjectURL(url), 4000);
   noteEl.textContent='PDF ڈاؤن لوڈ ہو گئی ✓ ('+checked.length+' ریکارڈ، مجموعی '+pages.length+' صفحات شامل ہیں)';
   toast('PDF تیار ✓');
+}
+
+/* ---------------- ضلع کی مکمل Excel فائل (District Office Zimedar کے لیے) ----------------
+   یہ اُس ضلع کے تمام ایکٹو ذمہ داران (ہر منصب) کی مہینہ وار خلاصہ فائل بناتا ہے — چاہے اُس مہینے
+   کوئی سفر جمع کروایا گیا ہو یا نہیں۔ "تصدیق شدہ" ٹیب کے اوپر والے مہینہ/سال فلٹر کو ہی استعمال
+   کرتا ہے (اگر "تمام مہینے" منتخب ہو تو موجودہ مہینہ استعمال ہوتا ہے)۔ */
+async function downloadDistrictExcelSummary(){
+  if(typeof XLSX==='undefined'){ toast('Excel لائبریری لوڈ نہیں ہو سکی — انٹرنیٹ چیک کریں'); return; }
+  const noteEl=document.getElementById('districtExcelStatusNote');
+  const fMonthEl=document.getElementById('verifiedFilterMonth');
+  const fYearEl=document.getElementById('verifiedFilterYear');
+  const month = (fMonthEl && fMonthEl.value!=='all') ? parseInt(fMonthEl.value,10) : new Date().getMonth();
+  const year = (fYearEl && fYearEl.value) ? parseInt(fYearEl.value,10) : new Date().getFullYear();
+
+  const myRole0 = currentUser.role||'box';
+  let myDistricts, districtLabelForFile;
+  if(myRole0==='admin'){
+    const fDistrictEl=document.getElementById('verifiedFilterDistrict');
+    const selectedDistrict = fDistrictEl ? fDistrictEl.value : '';
+    if(!selectedDistrict){ toast('پہلے اوپر سے ایک ضلع منتخب کریں'); return; }
+    myDistricts = [normLoc(selectedDistrict)];
+    districtLabelForFile = selectedDistrict;
+  } else {
+    myDistricts = userDistricts(currentUser);
+    districtLabelForFile = displayDistricts(currentUser) || myDistricts[0] || '';
+  }
+  if(!myDistricts.length){ toast('آپ کے پروفائل میں کوئی ضلع درج نہیں'); return; }
+
+  noteEl.textContent='Excel تیار ہو رہی ہے، براہ کرم انتظار کریں...';
+
+  const allUsers = await getAllUsers();
+  const districtUsers = allUsers.filter(u=> u.status!=='closed' && userDistricts(u).some(d=>myDistricts.includes(d)))
+    .sort((a,b)=> (a.name||'').localeCompare(b.name||''));
+
+  if(!districtUsers.length){ noteEl.textContent='اس ضلع میں کوئی ایکٹو ذمہ دار نہیں ملا۔'; return; }
+  noteEl.textContent = `Excel تیار ہو رہی ہے... (0/${districtUsers.length} ذمہ داران مکمل)`;
+
+  // مہینے کے پٹرول ریٹ شیڈول کے "کینونیکل" (سب کے لیے یکساں) عرصے — ایک بھی ذمہ دار کے ڈیٹا پر
+  // منحصر نہیں، صرف عالمی (Global) ریٹ ترتیب سے اخذ ہوتے ہیں، تاکہ ہر قطار میں ایک جیسے کالم آئیں۔
+  const globalCfg = await loadGlobalPetrolConfig();
+  const canonicalGroups = await getRateBreakdownForMonth(globalCfg.slabs||[], globalCfg.defaultRate||0, year, month, null);
+  function periodLabel(g){
+    const sd=parseInt(g.start.slice(8,10),10), ed=parseInt(g.end.slice(8,10),10);
+    return 'KM ' + (sd===ed ? sd : (sd+'-'+ed));
+  }
+
+  const rows=[];
+  const excelStartTime = Date.now();
+  for(let idx=0; idx<districtUsers.length; idx++){
+    const u = districtUsers[idx];
+    const data = await buildLedgerData(u.code, year, month);
+    const kmByPeriod = canonicalGroups.map(cg=>{
+      const match = data.rateBreakdown.find(g=>g.start===cg.start && g.end===cg.end);
+      return match ? Math.round(match.km||0) : 0;
+    });
+    rows.push([
+      rows.length+1, u.code, data.profile.name||u.name||'', ROLE_LABELS[u.role]||u.role||'',
+      data.profile.bankName||'', data.profile.branchCode||'', data.profile.accNo||'',
+      Math.round(data.netPayable||0), Math.round(data.monthlyDeduction||0),
+      Math.round((data.totalPetrol||0)+(data.totalMaintenance||0)), Math.round(data.totalFare||0),
+      '', data.profile.bikeAvg||'',
+      ...kmByPeriod
+    ]);
+    // پیش رفت اور تخمینی باقی وقت دکھاتے ہیں تاکہ انتظار کرنے والے کو اندازہ ہو
+    const doneCount = idx+1;
+    const remainingCount = districtUsers.length - doneCount;
+    const avgMs = (Date.now()-excelStartTime) / doneCount;
+    const etaSec = Math.max(1, Math.ceil((avgMs*remainingCount)/1000));
+    noteEl.textContent = remainingCount>0
+      ? `Excel تیار ہو رہی ہے... (${doneCount}/${districtUsers.length} ذمہ داران مکمل، تقریباً ${etaSec} سیکنڈ باقی)`
+      : `Excel تیار ہو رہی ہے... (${doneCount}/${districtUsers.length} مکمل، فائل بن رہی ہے)`;
+  }
+
+  const wsData=[];
+  wsData.push(['پٹرول ریٹ شیڈول — '+urduMonths[month]+' '+year]);
+  wsData.push(['Sr.No','تاریخ (از - تا)','پٹرول ریٹ']);
+  canonicalGroups.forEach((g,i)=> wsData.push([i+1, g.start===g.end? g.start : (g.start+' سے '+g.end), fmtNumRound(g.rate)]));
+  wsData.push([]);
+  wsData.push([
+    'Sr.','Employee Code','Name','Designation','Bank','B.Code','Bank A/c No.','Amount','Deductions',
+    'Conveyance (KM)','Conveyance (Fare)','Request By','Bike Average', ...canonicalGroups.map(periodLabel)
+  ]);
+  rows.forEach(r=>wsData.push(r));
+
+  const ws = XLSX.utils.aoa_to_sheet(wsData);
+  ws['!cols'] = [ {wch:5},{wch:12},{wch:24},{wch:20},{wch:10},{wch:9},{wch:20},{wch:10},{wch:10},{wch:14},{wch:14},{wch:12},{wch:10}, ...canonicalGroups.map(()=>({wch:10})) ];
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, 'District Summary');
+  const districtNameForFile = (districtLabelForFile||myDistricts[0]).replace(/[^a-zA-Z0-9\u0600-\u06FF]+/g,'_');
+  XLSX.writeFile(wb, `District_${districtNameForFile}_${urduMonths[month]}_${year}.xlsx`);
+
+  noteEl.textContent = 'Excel ڈاؤن لوڈ ہو گئی ✓ ('+districtUsers.length+' ذمہ داران شامل ہیں)';
+  toast('Excel تیار ✓');
 }
 
 /* ---------------- daily entries ---------------- */
@@ -3656,7 +3785,7 @@ Object.assign(window, {
   saveProfileData, onMonthChange, shiftMonth, addSlabRow, removeSlabRow, saveSlabs, renderRateBreakdownPreview,
   addGlobalSlabRow, removeGlobalSlabRow, saveGlobalPetrol,
   showAppTab, doLogout, openSubordinate, backToOwn, openSubmittedItem, quickSendBack,
-  toggleSelectAllVerified, downloadSingleVerifiedPdf, bulkDownloadVerifiedPdf,
+  toggleSelectAllVerified, downloadSingleVerifiedPdf, bulkDownloadVerifiedPdf, downloadDistrictExcelSummary,
   previewCurrentLedger, previewLedgerFor, closePreviewModal, approveFromPreview, sendBackFromPreview,
   sendToFinanceNoSignature, sendToFinanceFromPreviewNoSignature,
   viewAttachmentFull, handleAttachmentUpload, removeAttachment, removeMeterPhoto,
