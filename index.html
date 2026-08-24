@@ -225,6 +225,7 @@
       <div class="tab hidden" id="tabVerified" onclick="showAppTab('verified')"><span class="ic">✅</span>تصدیق شدہ</div>
       <div class="tab hidden" id="tabAddUser" onclick="showAppTab('adduser')"><span class="ic">➕</span>نیا ذمہ دار</div>
       <div class="tab hidden" id="tabAssignSup" onclick="showAppTab('assignsup')"><span class="ic">🎯</span>سپروائزر تفویض</div>
+      <div class="tab hidden" id="tabReports" onclick="showAppTab('reports')"><span class="ic">📊</span>رپورٹس</div>
       <div class="tab" id="tabPdf" onclick="showAppTab('pdf')"><span class="ic">📄</span>PDF</div>
     </div>
 
@@ -234,7 +235,8 @@
       <div class="card-body" id="dashboardBody"><div class="empty">لوڈ ہو رہا ہے...</div></div>
     </div>
 
-    <div class="card hidden" id="districtReportCard">
+    <!-- REPORTS TAB -->
+    <div class="card hidden" id="reportsTab">
       <div class="card-head"><span class="lbl">📍 ذمہ داران کی رپورٹ (لاگ ان / سفری اندراج)</span></div>
       <div class="card-body">
         <div class="note">منتخب مہینے کے لیے آپ کے دائرہ اختیار کے ذمہ داران کی تعداد، جمع/زیر التوا کی تفصیل، کل ماہانہ خرچہ، کس نے لاگ ان کیا اور کس نے سفری اندراج کیا — یہ سب دیکھیں۔</div>
@@ -242,6 +244,7 @@
           <div class="field"><label>سال</label><input type="number" id="distReportYear"></div>
           <div class="field"><label>مہینہ</label><select id="distReportMonth"></select></div>
         </div>
+        <div class="field hidden" id="distReportDistrictWrap"><label>ضلع منتخب کریں (اختیاری — صرف ایک ضلع دیکھنے کے لیے)</label><select id="distReportDistrict" onchange="renderDistrictReport()"><option value="">-- تمام اضلاع (Overall + ہر ضلع) --</option></select></div>
         <button class="btn-primary btn-sm" onclick="renderDistrictReport()">📊 رپورٹ دیکھیں</button>
         <div id="distReportBody" style="margin-top:12px;"></div>
         <div class="note hidden" id="distReportMigrateWrap" style="margin-top:16px;border:1px dashed var(--gold);padding:8px;">
@@ -1111,6 +1114,7 @@ async function enterApp(landingTab){
   document.getElementById('tabVerified').classList.toggle('hidden', hasNoSubs);
   document.getElementById('tabAddUser').classList.toggle('hidden', currentUser.role!=='admin');
   document.getElementById('tabAssignSup').classList.toggle('hidden', currentUser.role!=='admin');
+  document.getElementById('tabReports').classList.toggle('hidden', !['admin','district','district_office','supervisor'].includes(currentUser.role||'box'));
   try{
     await Promise.all([ loadProfileIntoForm(), loadSlabsIntoForm(), refreshOrgNameLabel() ]);
   }catch(e){
@@ -1505,6 +1509,7 @@ async function saveProfileData(){
       document.getElementById('tabVerified').classList.toggle('hidden', hasNoSubs);
       document.getElementById('tabAddUser').classList.toggle('hidden', currentUser.role!=='admin');
       document.getElementById('tabAssignSup').classList.toggle('hidden', currentUser.role!=='admin');
+      document.getElementById('tabReports').classList.toggle('hidden', !['admin','district','district_office','supervisor'].includes(currentUser.role||'box'));
     }
     if(viewingUserObj && viewingUserObj.code===code){
       viewingUserObj.name=name;
@@ -1724,7 +1729,7 @@ async function renderRateBreakdownPreview(){
 
 /* ---------------- tabs ---------------- */
 function showAppTab(which){
-  ['Dashboard','Profile','Petrol','Daily','Sub','Submitted','Verified','AddUser','AssignSup','Pdf'].forEach(t=>{
+  ['Dashboard','Profile','Petrol','Daily','Sub','Submitted','Verified','AddUser','AssignSup','Reports','Pdf'].forEach(t=>{
     const el=document.getElementById('tab'+t);
     if(el) el.classList.toggle('active', t.toLowerCase()===which);
   });
@@ -1737,21 +1742,23 @@ function showAppTab(which){
   document.getElementById('verifiedTab').classList.toggle('hidden', which!=='verified');
   document.getElementById('addUserTab').classList.toggle('hidden', which!=='adduser');
   document.getElementById('assignSupTab').classList.toggle('hidden', which!=='assignsup');
+  document.getElementById('reportsTab').classList.toggle('hidden', which!=='reports');
   document.getElementById('dangerZoneCard').classList.toggle('hidden', which!=='adduser');
   document.getElementById('pdfTab').classList.toggle('hidden', which!=='pdf');
   if(which==='dashboard'){
     renderDashboard();
-    const reportCard = document.getElementById('districtReportCard');
+  }
+  if(which==='reports'){
     const myRole = currentUser.role||'box';
-    const canSeeReport = ['admin','district','district_office','supervisor'].includes(myRole);
-    reportCard.classList.toggle('hidden', !canSeeReport);
     document.getElementById('distReportMigrateWrap').classList.toggle('hidden', myRole!=='admin');
-    if(canSeeReport && !document.getElementById('distReportMonth').options.length){
+    if(!document.getElementById('distReportMonth').options.length){
       const now = new Date();
       document.getElementById('distReportYear').value = now.getFullYear();
       document.getElementById('distReportMonth').innerHTML = urduMonths.map((m,i)=>`<option value="${i}">${m}</option>`).join('');
       document.getElementById('distReportMonth').value = now.getMonth();
     }
+    populateAdminDistrictFilter('distReportDistrict','distReportDistrictWrap');
+    renderDistrictReport();
   }
   if(which==='sub') renderSubList();
   if(which==='submitted') renderSubmittedList();
@@ -2779,11 +2786,18 @@ async function renderDistrictReport(){
   const apprMap = {};
   allApprovals.filter(a=>a.year===year && a.month===month).forEach(a=>apprMap[a.code]=a);
 
-  const scopeUsers = isAdmin
+  const fDistrictEl = document.getElementById('distReportDistrict');
+  const fDistrictRaw = (isAdmin && fDistrictEl) ? fDistrictEl.value : '';
+  const fDistrictNorm = fDistrictRaw ? normLoc(fDistrictRaw) : '';
+
+  let scopeUsers = isAdmin
     ? (await getAllUsers()).filter(u=>u.status!=='closed')
     : (await getSubordinates()).filter(u=>u.status!=='closed');
+  if(fDistrictNorm){
+    scopeUsers = scopeUsers.filter(u=>userDistricts(u).includes(fDistrictNorm));
+  }
 
-  if(!scopeUsers.length){ box.innerHTML='<div class="empty">آپ کے دائرہ اختیار میں کوئی ذمہ دار موجود نہیں۔</div>'; return; }
+  if(!scopeUsers.length){ box.innerHTML='<div class="empty">اس ضلع/دائرہ اختیار میں کوئی ذمہ دار موجود نہیں۔</div>'; return; }
 
   const districtGroups = {};
   scopeUsers.forEach(u=>{
@@ -2833,7 +2847,7 @@ async function renderDistrictReport(){
   }));
 
   let html='';
-  if(isAdmin){
+  if(isAdmin && !fDistrictNorm){
     html += cardHtml('مجموعی (Overall) — تمام اضلاع', scopeUsers, scopeUsers.map(u=>perUserResults[u.code]));
   }
   for(const distName of districtNames){
