@@ -235,16 +235,16 @@
     </div>
 
     <div class="card hidden" id="districtReportCard">
-      <div class="card-head"><span class="lbl">📍 ڈسٹرکٹ وائز رپورٹ</span></div>
+      <div class="card-head"><span class="lbl">📍 ذمہ داران کی رپورٹ (لاگ ان / سفری اندراج)</span></div>
       <div class="card-body">
-        <div class="note">منتخب مہینے کے لیے ہر ضلع کے ذمہ داران کی تعداد، جمع/زیر التوا کی تفصیل، اور کل ماہانہ خرچہ دیکھیں۔</div>
+        <div class="note">منتخب مہینے کے لیے آپ کے دائرہ اختیار کے ذمہ داران کی تعداد، جمع/زیر التوا کی تفصیل، کل ماہانہ خرچہ، کس نے لاگ ان کیا اور کس نے سفری اندراج کیا — یہ سب دیکھیں۔</div>
         <div class="row2">
           <div class="field"><label>سال</label><input type="number" id="distReportYear"></div>
           <div class="field"><label>مہینہ</label><select id="distReportMonth"></select></div>
         </div>
         <button class="btn-primary btn-sm" onclick="renderDistrictReport()">📊 رپورٹ دیکھیں</button>
         <div id="distReportBody" style="margin-top:12px;"></div>
-        <div class="note" style="margin-top:16px;border:1px dashed var(--gold);padding:8px;">
+        <div class="note hidden" id="distReportMigrateWrap" style="margin-top:16px;border:1px dashed var(--gold);padding:8px;">
           نظام میں تبدیلیاں (نئی تنظیمی ترتیب) پرانے جمع شدہ ریکارڈز پر خودکار لاگو نہیں ہوتیں — یہ بٹن پرانے، ابھی تک زیر غور (نامکمل) ریکارڈز کو نئے سسٹم کے مطابق درست چیکر کے پاس بھیج دے گا۔
           <button class="btn-ghost btn-sm" style="margin-top:6px;" onclick="migrateOldSubmittedStages()">🔄 پرانے جمع شدہ ریکارڈز اپڈیٹ کریں</button>
         </div>
@@ -1075,6 +1075,8 @@ async function doLogin(){
   if(user.status==='closed'){toast('یہ آئی ڈی بند کر دی گئی ہے — ایڈمن سے رابطہ کریں');btn.disabled=false;return;}
   if(!user.role) user.role='box';
   btn.disabled=false;
+  user.lastLogin = new Date().toISOString();
+  fsSet('users', code, user); // پس منظر میں محفوظ ہوتا ہے، لاگ ان کی رفتار متاثر نہیں ہوتی
   currentUser=user; saveSession(user); saveLastTab('dashboard');
   try{ localStorage.setItem(SESSION_START_KEY, String(Date.now())); }catch(e){}
   await enterApp('dashboard');
@@ -1740,8 +1742,11 @@ function showAppTab(which){
   if(which==='dashboard'){
     renderDashboard();
     const reportCard = document.getElementById('districtReportCard');
-    reportCard.classList.toggle('hidden', currentUser.role!=='admin');
-    if(currentUser.role==='admin' && !document.getElementById('distReportMonth').options.length){
+    const myRole = currentUser.role||'box';
+    const canSeeReport = ['admin','district','district_office','supervisor'].includes(myRole);
+    reportCard.classList.toggle('hidden', !canSeeReport);
+    document.getElementById('distReportMigrateWrap').classList.toggle('hidden', myRole!=='admin');
+    if(canSeeReport && !document.getElementById('distReportMonth').options.length){
       const now = new Date();
       document.getElementById('distReportYear').value = now.getFullYear();
       document.getElementById('distReportMonth').innerHTML = urduMonths.map((m,i)=>`<option value="${i}">${m}</option>`).join('');
@@ -2447,6 +2452,8 @@ async function handleAttachmentUpload(evt){
   evt.target.value='';
 }
 async function removeAttachment(idx){
+  const sure = confirm('کیا آپ یہ تصویر حذف کرنا چاہتے ہیں؟ یہ عمل واپس نہیں ہو سکتا۔');
+  if(!sure) return;
   const {code,year,month} = cachedAttachmentsContext;
   const merged = cachedAttachments.filter((_,i)=>i!==idx);
   const ok = await saveAttachmentsList(code, year, month, merged);
@@ -2733,67 +2740,105 @@ async function migrateOldSubmittedStages(){
   toast(`مکمل ✓ — ${checkedCount} ریکارڈز چیک کیے گئے، ${fixedCount} کو نئے سسٹم کے مطابق درست کر دیا گیا`);
   updateSubmittedBadgeCount();
 }
-async function computeUserMonthTotal(code, year, month, globalCfg, profileCache){
+async function computeUserMonthSummary(code, year, month, globalCfg, profileCache){
   const profile = (profileCache && profileCache[code]) || (await fsGet('profiles', code)) || {};
   const map = await getMonthEntryMapFor(code, year, month);
   let slabs, defaultRate;
   if(globalCfg.enabled){ slabs=globalCfg.slabs||[]; defaultRate=globalCfg.defaultRate||0; }
   else { const s = (await fsGet('slabs', code)) || {slabs:[],defaultRate:0}; slabs=s.slabs||[]; defaultRate=s.defaultRate||0; }
-  let totalFare=0, totalPetrol=0, totalMaintenance=0;
+  let totalFare=0, totalPetrol=0, totalMaintenance=0, filledCount=0;
   Object.keys(map).forEach(dateStr=>{
     const e = map[dateStr];
     const filled = !!(e && (e.travel||e.activity||e.km||e.fare));
     if(!filled) return;
+    filledCount++;
     const rate = rateForDate(dateStr, slabs, defaultRate);
     const petrol = profile.bikeAvg>0 ? ((e.km||0)/profile.bikeAvg)*rate : 0;
     totalFare += e.fare||0; totalPetrol += petrol; totalMaintenance += (e.km||0)*2;
   });
-  return totalFare+totalPetrol+totalMaintenance;
+  return { totalBill: totalFare+totalPetrol+totalMaintenance, hasEntry: filledCount>0, entryCount: filledCount };
+}
+// "کبھی لاگ ان نہیں ہوا" یا تاریخ — اور کیا وہ لاگ ان اسی منتخب مہینے میں ہوا تھا
+function loginInfoFor(u, year, month){
+  if(!u.lastLogin) return { label:'کبھی لاگ ان نہیں ہوا', loggedInThisMonth:false };
+  const d = new Date(u.lastLogin);
+  if(isNaN(d.getTime())) return { label:'کبھی لاگ ان نہیں ہوا', loggedInThisMonth:false };
+  const label = urduMonths[d.getMonth()]+' '+d.getDate()+', '+d.getFullYear();
+  return { label, loggedInThisMonth: (d.getFullYear()===year && d.getMonth()===month) };
 }
 async function renderDistrictReport(){
-  if(currentUser.role!=='admin') return;
+  const myRole = currentUser.role||'box';
+  if(!['admin','district','district_office','supervisor'].includes(myRole)) return;
+  const isAdmin = myRole==='admin';
   const year = parseInt(document.getElementById('distReportYear').value)||new Date().getFullYear();
   const month = parseInt(document.getElementById('distReportMonth').value)||0;
   const box = document.getElementById('distReportBody');
   box.innerHTML = '<div class="empty">لوڈ ہو رہا ہے...</div>';
-  const allUsers = (await getAllUsers()).filter(u=>u.status!=='closed');
   const globalCfg = await loadGlobalPetrolConfig();
   const allApprovals = await fsListAll('approvals');
   const apprMap = {};
   allApprovals.filter(a=>a.year===year && a.month===month).forEach(a=>apprMap[a.code]=a);
+
+  const scopeUsers = isAdmin
+    ? (await getAllUsers()).filter(u=>u.status!=='closed')
+    : (await getSubordinates()).filter(u=>u.status!=='closed');
+
+  if(!scopeUsers.length){ box.innerHTML='<div class="empty">آپ کے دائرہ اختیار میں کوئی ذمہ دار موجود نہیں۔</div>'; return; }
+
   const districtGroups = {};
-  allUsers.forEach(u=>{
+  scopeUsers.forEach(u=>{
     const dists = userDistricts(u);
     const keys = dists.length ? dists : ['(کوئی ضلع تفویض نہیں)'];
     keys.forEach(k=>{ if(!districtGroups[k]) districtGroups[k]=[]; districtGroups[k].push(u); });
   });
   const districtNames = Object.keys(districtGroups).sort();
-  let html='';
-  for(const distName of districtNames){
-    const usersInDist = districtGroups[distName];
-    const results = await Promise.all(usersInDist.map(async u=>{
-      const appr = apprMap[u.code];
-      const isSubmitted = !!(appr && (appr.status==='submitted' || appr.status==='approved'));
-      const totalBill = await computeUserMonthTotal(u.code, year, month, globalCfg);
-      return {name:u.name, isSubmitted, totalBill, profileVerified: !!u.profileVerified};
-    }));
-    let submittedCount=0, distExpense=0, verifiedCount=0; const pendingNames=[], unverifiedNames=[];
+
+  function cardHtml(title, usersInGroup, results){
+    let submittedCount=0, distExpense=0, verifiedCount=0, loggedInCount=0, enteredCount=0;
+    const pendingNames=[], unverifiedNames=[], notLoggedInNames=[], notEnteredNames=[];
     results.forEach(r=>{
       if(r.isSubmitted) submittedCount++; else pendingNames.push(r.name);
       if(r.profileVerified) verifiedCount++; else unverifiedNames.push(r.name);
       distExpense+=r.totalBill;
+      if(r.loginInfo.loggedInThisMonth) loggedInCount++; else notLoggedInNames.push(r.name+' ('+r.loginInfo.label+')');
+      if(r.hasEntry) enteredCount++; else notEnteredNames.push(r.name);
     });
-    html += `<div class="card" style="margin-bottom:10px;box-shadow:none;border:1px solid var(--line);">
-      <div class="card-head"><span class="lbl">📍 ${distName}</span></div>
+    return `<div class="card" style="margin-bottom:10px;box-shadow:none;border:1px solid var(--line);">
+      <div class="card-head"><span class="lbl">📍 ${title}</span></div>
       <div class="card-body">
-        <div>کل ذمہ داران: <b>${usersInDist.length}</b></div>
+        <div>کل ذمہ داران: <b>${usersInGroup.length}</b></div>
         <div>جمع شدہ سفری ریکارڈ: <b style="color:var(--success);">${submittedCount}</b> &nbsp;|&nbsp; زیر التوا (Pending): <b style="color:var(--danger);">${pendingNames.length}</b></div>
         ${pendingNames.length ? `<div class="note" style="margin-top:4px;">زیر التوا ذمہ داران: ${pendingNames.join('، ')}</div>` : ''}
         <div style="margin-top:6px;">پروفائل تصدیق شدہ: <b style="color:var(--success);">${verifiedCount}</b> &nbsp;|&nbsp; غیر تصدیق شدہ: <b style="color:var(--danger);">${unverifiedNames.length}</b></div>
         ${unverifiedNames.length ? `<div class="note" style="margin-top:4px;">غیر تصدیق شدہ ذمہ داران: ${unverifiedNames.join('، ')}</div>` : ''}
-        <div style="margin-top:6px;">اس ضلع کا کل ماہانہ خرچہ: <b>${fmtNum(distExpense)}</b></div>
+        <div style="margin-top:6px;">اس مہینے لاگ ان کیا: <b style="color:var(--success);">${loggedInCount}</b> &nbsp;|&nbsp; اس مہینے لاگ ان نہیں کیا: <b style="color:var(--danger);">${notLoggedInNames.length}</b></div>
+        ${notLoggedInNames.length ? `<div class="note" style="margin-top:4px;">لاگ ان نہیں کیا: ${notLoggedInNames.join('، ')}</div>` : ''}
+        <div style="margin-top:6px;">سفری اندراج کیا: <b style="color:var(--success);">${enteredCount}</b> &nbsp;|&nbsp; بالکل اندراج نہیں کیا: <b style="color:var(--danger);">${notEnteredNames.length}</b></div>
+        ${notEnteredNames.length ? `<div class="note" style="margin-top:4px;">اندراج نہیں کیا: ${notEnteredNames.join('، ')}</div>` : ''}
+        <div style="margin-top:6px;">${isAdmin&&title!=='مجموعی (Overall) — تمام اضلاع'?'اس ضلع':'کل'} ماہانہ خرچہ: <b>${fmtNum(distExpense)}</b></div>
       </div>
     </div>`;
+  }
+
+  // ہر یوزر کے لیے ایک ہی بار ڈیٹا اکٹھا کرتے ہیں (تاکہ Overall اور ضلع وار دونوں کارڈز کے لیے دوبارہ سرور کو کال نہ کرنی پڑے)
+  const perUserResults = {};
+  await Promise.all(scopeUsers.map(async u=>{
+    const appr = apprMap[u.code];
+    const isSubmitted = !!(appr && (appr.status==='submitted' || appr.status==='approved'));
+    const summary = await computeUserMonthSummary(u.code, year, month, globalCfg);
+    perUserResults[u.code] = {
+      name:u.name, isSubmitted, totalBill:summary.totalBill, hasEntry:summary.hasEntry,
+      profileVerified: !!u.profileVerified, loginInfo: loginInfoFor(u, year, month)
+    };
+  }));
+
+  let html='';
+  if(isAdmin){
+    html += cardHtml('مجموعی (Overall) — تمام اضلاع', scopeUsers, scopeUsers.map(u=>perUserResults[u.code]));
+  }
+  for(const distName of districtNames){
+    const usersInDist = districtGroups[distName];
+    html += cardHtml(distName, usersInDist, usersInDist.map(u=>perUserResults[u.code]));
   }
   box.innerHTML = html || '<div class="empty">کوئی ذمہ دار موجود نہیں۔</div>';
 }
