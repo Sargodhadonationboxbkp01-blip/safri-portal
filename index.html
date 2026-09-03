@@ -2757,7 +2757,13 @@ async function renderApprovalBadge(){
       html += `<div class="note" style="margin-top:8px;">یہ مہینہ جمع کروایا جا چکا ہے — مزید ترمیم کے لیے متعلقہ افسر سے رابطہ کریں (آپ ابھی بھی ریمارکس میں پیغام بھیج سکتے ہیں)۔</div>`;
     }
   } else if(appr && appr.status==='submitted'){
-    const canAct = myRole==='admin' || (myRole==='supervisor' && appr.stage==='supervisor') || (myRole==='district' && appr.stage==='district') || (myRole==='division' && appr.stage==='division') || (myRole==='district_office' && appr.stage==='district_office');
+    const submitterRole = (viewingUserObj && viewingUserObj.role) || 'box';
+    const canAct = myRole==='admin'
+      || (myRole==='supervisor' && appr.stage==='supervisor')
+      || (myRole==='district' && (appr.stage==='district' || appr.stage==='supervisor'))
+      || (myRole==='division' && (appr.stage==='division' || (appr.stage==='district' && submitterRole==='supervisor')))
+      || (myRole==='division_coordinator' && appr.stage==='division_coordinator')
+      || (myRole==='district_office' && appr.stage==='district_office');
     if(canAct){
       const isFinalStage = appr.stage==='district_office';
       html += `<div class="btn-row" style="margin-top:8px;">
@@ -3352,7 +3358,14 @@ async function showLedgerPreviewModal(overrideCode, overrideYear, overrideMonth)
     const myRole = currentUser.role||'box';
     let actionHtml='';
     if(!isOwn && appr && appr.status==='submitted'){
-      const canAct = myRole==='admin' || (myRole==='supervisor' && appr.stage==='supervisor') || (myRole==='district' && appr.stage==='district') || (myRole==='division' && appr.stage==='division') || (myRole==='district_office' && appr.stage==='district_office');
+      const submitterDoc = await fsGet('users', code);
+      const submitterRole = (submitterDoc && submitterDoc.role) || 'box';
+      const canAct = myRole==='admin'
+        || (myRole==='supervisor' && appr.stage==='supervisor')
+        || (myRole==='district' && (appr.stage==='district' || appr.stage==='supervisor'))
+        || (myRole==='division' && (appr.stage==='division' || (appr.stage==='district' && submitterRole==='supervisor')))
+        || (myRole==='division_coordinator' && appr.stage==='division_coordinator')
+        || (myRole==='district_office' && appr.stage==='district_office');
       if(canAct){
         const isFinalStage = appr.stage==='district_office';
         actionHtml = `<div class="btn-row" style="margin-top:12px;">
@@ -3947,7 +3960,8 @@ Object.assign(window, {
   generateAndDownloadPdf, shareWhatsApp, renderDaysList, populateLocationDatalists,
   onAdminPickRoleChange, onAdminPickUserChange, backToOwnFromPicker, toggleSelectAllSub, bulkLockProfiles, confirmMailedToFinance, adminClearMonthEntries, renderDistrictReport, migrateOldSubmittedStages, verifyMemberProfile, adminDeletePhotos, switchDoProfileMode, filterDoProfileList, selectDoProfile, filterAdminSearchList, selectAdminSearchResult, markSentToBank,
   renderSubmittedList, renderVerifiedList,
-  initAssignSupTab, onAssignDistrictChange, onAssignSupervisorChange, saveDistrictAssignments, unassignBoxDirect
+  initAssignSupTab, onAssignDistrictChange, onAssignSupervisorChange, saveDistrictAssignments, unassignBoxDirect,
+  renderDashboard, handleMeterPhotoUpload, toggleDayRemarks, viewMeterPhotoFull
 });
 </script>
 </body>
