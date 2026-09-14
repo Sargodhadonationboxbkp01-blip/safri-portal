@@ -802,18 +802,47 @@ async function fsListAllIds(col){
   try{ const r = await _apiCall('list-ids', {col}); return r.data; }
   catch(e){ console.error(e); return []; }
 }
-async function fsListWhere(col, field, value){
-  const key = col+'::'+field+'::'+value;
+async function fsListWhere(col, field, value, year, month){
+  const key = col+'::'+field+'::'+value+'::'+(year??'')+'::'+(month??'');
   const now=Date.now();
   const c=_fsCache.listWhere[key];
   if(c && (now-c.t)<FS_CACHE_TTL) return c.data;
   try{
-    const r = await _apiCall('list-where', {col, field, value});
+    const extra = {col, field, value};
+    if(year!==undefined && year!==null) extra.year = year;
+    if(month!==undefined && month!==null) extra.month = month;
+    const r = await _apiCall('list-where', extra);
     _fsCache.listWhere[key]={data:r.data,t:now};
     return r.data;
   }catch(e){ console.error(e); toast('سرور سے ریکارڈ لینے میں خرابی — انٹرنیٹ/سرور چیک کریں'); return []; }
 }
 function toast(msg){const t=document.getElementById('toast');t.textContent=msg;t.style.display='block';setTimeout(()=>{t.style.display='none';},3000);}
+
+// FIX (PIN security): PIN pehle plaintext save aur compare hoti thi۔ Ab hum PIN ko SHA-256 se
+// hash kar ke save karte hain, taake agar kabhi 'users' collection ka data kisi tarah nikal
+// bhi jaye to asal PIN kisi ko na pata chale۔
+// Backward-compatible: purane accounts jinki PIN abhi bhi plaintext save hai, unka login
+// pehle ki tarah chalta rahega — aur login hotay hi unki PIN khud-ba-khud hash ho kar dobara
+// save ho jati hai (silent, ek dafa ka migration) — kisi ko kuch alag se karne ki zaroorat nahi۔
+async function sha256Hex(text){
+  const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(String(text)));
+  return Array.from(new Uint8Array(buf)).map(b=>b.toString(16).padStart(2,'0')).join('');
+}
+function looksHashed(pin){ return typeof pin === 'string' && /^[0-9a-f]{64}$/i.test(pin); }
+async function pinMatches(storedPin, inputPin){
+  if(looksHashed(storedPin)) return storedPin.toLowerCase() === (await sha256Hex(inputPin));
+  return storedPin === inputPin; // purana plaintext record — sirf ek dafa yahan tak pahunchega
+}
+
+// FIX (XSS): naam ya koi bhi user-supplied text ko innerHTML mein daalne se pehle isay
+// istemal karein — har koi apna "naam" khud badal sakta hai, is liye agar koi <script> ya
+// onerror= jaisi cheez naam mein daal de to ye function usay bekhatar plain text bana deta
+// hai, taake wo doosron ke browser mein chal na sake۔
+function escapeHtml(str){
+  return String(str==null?'':str).replace(/[&<>"']/g, ch => ({
+    '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;'
+  }[ch]));
+}
 
 /* ---------------- organization name / letterhead (global setting, admin-editable) ---------------- */
 let cachedOrgName='';
@@ -869,7 +898,9 @@ function roleHasNoSubordinateDuty(role){
 
 function fillMonthSelect(){ document.getElementById('pMonth').innerHTML=urduMonths.map((m,i)=>`<option value="${i}">${m}</option>`).join(''); }
 fillMonthSelect();
-// "جمع شدہ" اور "تصدیق شدہ" لسٹس کے لیے مہینہ فلٹر — ڈیفالٹ ہمیشہ "تمام مہینے" ہوتا ہے، یعنی پہلے جیسا ہی رویہ برقرار رہتا ہے جب تک کوئی خود کوئی مہینہ منتخب نہ کرے۔
+// "جمع شدہ" اور "تصدیق شدہ" لسٹس کے لیے مہینہ فلٹر — ڈیفالٹ اب "موجودہ مہینہ" ہوتا ہے (تیز، سرور پر
+// صرف اسی مہینے کا ڈیٹا پڑھا جاتا ہے) — چاہیں تو "تمام مہینے" الگ سے منتخب کر سکتے ہیں (اس صورت میں
+// تھوڑا دھیمہ ہوگا، کیونکہ سب مہینوں کا ڈیٹا اکٹھا کرنا پڑتا ہے)۔
 function fillMonthFilterSelect(id){
   const el=document.getElementById(id);
   if(!el) return;
@@ -878,9 +909,13 @@ function fillMonthFilterSelect(id){
 fillMonthFilterSelect('submittedFilterMonth');
 fillMonthFilterSelect('verifiedFilterMonth');
 (function(){
-  const y = new Date().getFullYear();
+  const now = new Date();
+  const y = now.getFullYear();
+  const m = now.getMonth();
   const sy=document.getElementById('submittedFilterYear'); if(sy) sy.value=y;
   const vy=document.getElementById('verifiedFilterYear'); if(vy) vy.value=y;
+  const sm=document.getElementById('submittedFilterMonth'); if(sm) sm.value=m;
+  const vm=document.getElementById('verifiedFilterMonth'); if(vm) vm.value=m;
 })();
 
 function localDateStr(dateObj){
@@ -986,7 +1021,17 @@ const SESSION_KEY='safri_session_v1';
 const SESSION_START_KEY='safri_session_start_v1';
 const SESSION_MAX_AGE_MS = 12*60*60*1000; // 12 hours — after this, the app requires logging in again
 const LAST_TAB_KEY='safri_last_tab_v1';
-function saveSession(user){ try{ localStorage.setItem(SESSION_KEY, JSON.stringify(user)); }catch(e){} }
+// FIX: poora user object (jis mein PIN bhi shamil hota tha) pehle localStorage mein
+// plaintext save hota tha — koi bhi jo device tak access rakhta ho (ya XSS ke zariye) PIN
+// parh sakta tha. Session restore beshak server se hamesha "fresh" record dobara mangwata
+// hai (dekhein tryRestoreSession), is liye PIN yahan save karne ki zaroorat kabhi thi hi nahi۔
+function saveSession(user){
+  try{
+    const safeUser = Object.assign({}, user);
+    delete safeUser.pin;
+    localStorage.setItem(SESSION_KEY, JSON.stringify(safeUser));
+  }catch(e){}
+}
 function clearSession(){ try{ localStorage.removeItem(SESSION_KEY); localStorage.removeItem(LAST_TAB_KEY); localStorage.removeItem(SESSION_START_KEY); }catch(e){} }
 function loadSession(){ try{ const v=localStorage.getItem(SESSION_KEY); return v?JSON.parse(v):null; }catch(e){ return null; } }
 function saveLastTab(tab){ try{ localStorage.setItem(LAST_TAB_KEY, tab); }catch(e){} }
@@ -995,7 +1040,7 @@ function loadLastTab(){ try{ return localStorage.getItem(LAST_TAB_KEY); }catch(e
 async function createOneUser(name, code, pin, role, district, districtsArr, division, dept){
   const existing = await fsGet('users', code);
   if(existing) return {ok:false, reason:'پہلے سے موجود'};
-  const user={code,name,dept,pin,role,district,districts:districtsArr,division,status:'active',createdAt:new Date().toISOString()};
+  const user={code,name,dept,pin:await sha256Hex(pin),role,district,districts:districtsArr,division,status:'active',createdAt:new Date().toISOString()};
   const ok = await fsSet('users', code, user);
   if(!ok) return {ok:false, reason:'محفوظ کرنے میں خرابی'};
   await fsSet('profiles', code, {
@@ -1084,11 +1129,12 @@ async function doLogin(){
   btn.disabled=true; toast('لاگ ان ہو رہا ہے...');
   const user = await fsGet('users', code);
   if(!user){toast('اکاؤنٹ نہیں ملا');btn.disabled=false;return;}
-  if(user.pin!==pin){toast('پن غلط ہے');btn.disabled=false;return;}
+  if(!(await pinMatches(user.pin, pin))){toast('پن غلط ہے');btn.disabled=false;return;}
   if(user.status==='closed'){toast('یہ آئی ڈی بند کر دی گئی ہے — ایڈمن سے رابطہ کریں');btn.disabled=false;return;}
   if(!user.role) user.role='box';
   btn.disabled=false;
   user.lastLogin = new Date().toISOString();
+  if(!looksHashed(user.pin)) user.pin = await sha256Hex(pin); // purani plaintext PIN ko khamoshi se hash mein badal dein
   fsSet('users', code, user); // پس منظر میں محفوظ ہوتا ہے، لاگ ان کی رفتار متاثر نہیں ہوتی
   currentUser=user; saveSession(user); saveLastTab('dashboard');
   try{ localStorage.setItem(SESSION_START_KEY, String(Date.now())); }catch(e){}
@@ -1132,8 +1178,11 @@ async function enterApp(landingTab){
     document.getElementById('dashboardBody').innerHTML = `<div class="empty">⚠️ ڈیٹا لوڈ نہیں ہو سکا — ڈیٹا میں کوئی خرابی ہے۔<br><button class="btn-primary" style="margin-top:10px;" onclick="location.reload()">دوبارہ کوشش کریں</button></div>`;
     return;
   }
-  updateSubmittedBadgeCount();
   showAppTab(landingTab || loadLastTab() || 'dashboard');
+  // "جمع شدہ"/"تصدیق شدہ" ٹیب کے اوپر والے نمبر (بیج) جان بوجھ کر تھوڑی دیر بعد لوڈ کیے جاتے ہیں —
+  // تاکہ لاگ ان کے فوراً بعد ڈیش بورڈ کا اصل ڈیٹا لوڈ ہونے میں یہ اضافی سرور کالز رکاوٹ نہ بنیں
+  // (اور اس دوران کیش بھر جانے کی وجہ سے یہ کالز عموماً فوری اور ہلکی ہو جاتی ہیں)۔
+  setTimeout(()=>{ updateSubmittedBadgeCount(); }, 1200);
 }
 
 
@@ -1158,16 +1207,23 @@ async function populateSupervisorDropdown(districtValue, currentValue){
   const firstDistrict = normLoc((districtValue||'').split(',')[0]||'');
   const allUsers = await getAllUsers();
   const matches = firstDistrict ? allUsers.filter(u=>u.role==='supervisor' && u.status!=='closed' && userDistricts(u).includes(firstDistrict)) : [];
-  let optionsHtml = '<option value="">-- منتخب کریں --</option>' + matches.map(u=>`<option value="${u.name}">${u.name}</option>`).join('');
+  let optionsHtml = '<option value="">-- منتخب کریں --</option>' + matches.map(u=>`<option value="${escapeHtml(u.name)}">${escapeHtml(u.name)}</option>`).join('');
   if(currentValue && !matches.some(u=>u.name===currentValue)){
-    optionsHtml += `<option value="${currentValue}">${currentValue} (فہرست میں موجود نہیں)</option>`;
+    optionsHtml += `<option value="${escapeHtml(currentValue)}">${escapeHtml(currentValue)} (فہرست میں موجود نہیں)</option>`;
   }
   sel.innerHTML = optionsHtml;
   sel.value = currentValue || '';
 }
+// FIX: race-condition guard — agar profile A load ho rahi ho aur usi dauran koi profile B
+// select kar le, to A ka (dheema) response ab bhi baad mein aa kar B ke form ko overwrite kar
+// sakta tha. Har call ko ek token dete hain; jab tak response aaye, agar koi NAYI call ho
+// chuki ho to purani call chup-chaap ruk jati hai (DOM ko chhoti tak nahi)۔
+let _profileLoadToken = 0;
 async function loadProfileIntoForm(){
+  const myToken = ++_profileLoadToken;
   let profile={};
   const [p, userDoc] = await Promise.all([ fsGet('profiles', activeCode()), fsGet('users', activeCode()) ]);
+  if(myToken !== _profileLoadToken) return; // ek naya call shuru ho chuka hai — ye purana result chhor dein
   if(p) profile=p;
   const isAdmin = currentUser.role==='admin';
   const isLocked = !!(userDoc && userDoc.profileLocked) && !isAdmin;
@@ -1210,6 +1266,7 @@ async function loadProfileIntoForm(){
   document.getElementById('pDistrict').disabled = !isAdmin; // only Admin can change a zimedar's assigned district
   document.getElementById('pDivision').value=profile.division||'';
   await populateSupervisorDropdown(document.getElementById('pDistrict').value, profile.supervisor||'');
+  if(myToken !== _profileLoadToken) return; // guard dobara — dropdown load hone tak koi naya switch to nahi hua
   document.getElementById('pDept').value=profile.dept||'';
   document.getElementById('pAccTitle').value=profile.accTitle||'';
   document.getElementById('pBankName').value=profile.bankName||'';
@@ -1221,6 +1278,7 @@ async function loadProfileIntoForm(){
   document.getElementById('pBikeCC').value=profile.bikeCC||'';
   document.getElementById('pBikeAvg').value=profile.bikeAvg||'';
   document.getElementById('pDeductionMonthly').value=profile.deduction||0;
+  if(myToken !== _profileLoadToken) return;
   await loadAssignBoxSection();
 }
 
@@ -1240,7 +1298,7 @@ async function loadAssignBoxSection(){
   listEl.innerHTML = boxUsers.map(u=>`
     <label style="display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px dashed var(--line);font-size:13px;cursor:pointer;">
       <input type="checkbox" class="assign-box-check" value="${u.code}" ${assigned.has(u.code)?'checked':''}>
-      <span>${u.name} — ${displayDistricts(u)||''} (${u.code})</span>
+      <span>${escapeHtml(u.name)} — ${displayDistricts(u)||''} (${u.code})</span>
     </label>`).join('');
 }
 async function saveAssignedBoxes(){
@@ -1286,7 +1344,7 @@ async function onAssignDistrictChange(keepSupervisor){
   const all = await getAllUsers();
   const dNorm = normLoc(district);
   const sups = all.filter(u=>u.role==='supervisor' && u.status!=='closed' && userDistricts(u).includes(dNorm)).sort((a,b)=>a.name.localeCompare(b.name));
-  supSel.innerHTML = '<option value="">-- منتخب کریں --</option>' + sups.map(u=>`<option value="${u.code}">${u.name}</option>`).join('');
+  supSel.innerHTML = '<option value="">-- منتخب کریں --</option>' + sups.map(u=>`<option value="${u.code}">${escapeHtml(u.name)}</option>`).join('');
   if(!sups.length){
     document.getElementById('assignSupBoxList').innerHTML = '<div class="empty">اس ضلع میں کوئی سپروائزر رجسٹرڈ نہیں۔ پہلے "نیا ذمہ دار" سے سپروائزر بنائیں۔</div>';
     return;
@@ -1316,14 +1374,14 @@ async function renderAssignSupBoxList(){
     const assignedTo = assignedToMap[u.code];
     if(assignedTo && assignedTo.code!==supCode){
       return `<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;padding:6px 0;border-bottom:1px dashed var(--line);font-size:13px;opacity:0.75;">
-        <span>${u.name} (${u.code}) — <span style="color:var(--danger);">پہلے سے "${assignedTo.name}" کو تفویض 🔒</span></span>
+        <span>${escapeHtml(u.name)} (${u.code}) — <span style="color:var(--danger);">پہلے سے "${escapeHtml(assignedTo.name)}" کو تفویض 🔒</span></span>
         <button class="btn-ghost btn-sm" onclick="unassignBoxDirect('${u.code}','${assignedTo.code}')">ان اسائن کریں</button>
       </div>`;
     }
     const checked = assignedTo && assignedTo.code===supCode;
     return `<label style="display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px dashed var(--line);font-size:13px;cursor:pointer;">
       <input type="checkbox" class="assign-sup-box-check" value="${u.code}" ${checked?'checked':''}>
-      <span>${u.name} (${u.code})</span>
+      <span>${escapeHtml(u.name)} (${u.code})</span>
     </label>`;
   }).join('');
   saveBtn.disabled = false;
@@ -1409,7 +1467,7 @@ async function loadDoProfileList(){
 function renderDoProfileList(list){
   const box = document.getElementById('doProfileList');
   if(!list.length){ box.innerHTML='<div class="empty">کوئی ذمہ دار نہیں ملا</div>'; return; }
-  box.innerHTML = list.map(u=>`<div class="sub-row" onclick="selectDoProfile('${u.code}')"><div><b>${u.name}</b>${u.profileVerified?' ✅':''}<div class="role-tag">${ROLE_LABELS[u.role]||u.role} (${u.code})</div></div><div class="darrow">›</div></div>`).join('');
+  box.innerHTML = list.map(u=>`<div class="sub-row" onclick="selectDoProfile('${u.code}')"><div><b>${escapeHtml(u.name)}</b>${u.profileVerified?' ✅':''}<div class="role-tag">${ROLE_LABELS[u.role]||u.role} (${u.code})</div></div><div class="darrow">›</div></div>`).join('');
 }
 function filterDoProfileList(){
   const q = document.getElementById('doProfileSearch').value.trim().toLowerCase();
@@ -1423,7 +1481,7 @@ async function selectDoProfile(code){
   await Promise.all([loadProfileIntoForm(), loadSlabsIntoForm()]);
   const bar=document.getElementById('viewingBar');
   bar.classList.remove('hidden');
-  bar.innerHTML = `آپ دیکھ رہے ہیں: <b>${u.name}</b> (${ROLE_LABELS[u.role]||u.role}) — <span class="back" onclick="switchDoProfileMode('subs')">فہرست پر واپس جائیں</span>`;
+  bar.innerHTML = `آپ دیکھ رہے ہیں: <b>${escapeHtml(u.name)}</b> (${ROLE_LABELS[u.role]||u.role}) — <span class="back" onclick="switchDoProfileMode('subs')">فہرست پر واپس جائیں</span>`;
   toast(`${u.name} کی پروفائل کھل گئی`);
 }
 let adminSearchCachedList = [];
@@ -1434,7 +1492,7 @@ async function filterAdminSearchList(){
   if(!adminSearchCachedList.length) adminSearchCachedList = await getAllUsers();
   const matches = adminSearchCachedList.filter(u=> (u.name||'').toLowerCase().includes(q) || (u.code||'').toLowerCase().includes(q)).slice(0,25);
   if(!matches.length){ box.innerHTML='<div class="empty">کوئی ذمہ دار نہیں ملا</div>'; return; }
-  box.innerHTML = matches.map(u=>`<div class="sub-row" onclick="selectAdminSearchResult('${u.code}')"><div><b>${u.name}</b>${u.status==='closed'?' <span style="color:var(--danger);font-size:11px;">(بند)</span>':''}<div class="role-tag">${ROLE_LABELS[u.role]||u.role} (${u.code})</div></div><div class="darrow">›</div></div>`).join('');
+  box.innerHTML = matches.map(u=>`<div class="sub-row" onclick="selectAdminSearchResult('${u.code}')"><div><b>${escapeHtml(u.name)}</b>${u.status==='closed'?' <span style="color:var(--danger);font-size:11px;">(بند)</span>':''}<div class="role-tag">${ROLE_LABELS[u.role]||u.role} (${u.code})</div></div><div class="darrow">›</div></div>`).join('');
 }
 async function selectAdminSearchResult(code){
   document.getElementById('adminPickRole').value='';
@@ -1452,7 +1510,7 @@ async function onAdminPickRoleChange(){
   const all = await getAllUsers();
   const filtered = all.filter(u=>u.role===role && u.status!=='closed').sort((a,b)=>(a.name||'').localeCompare(b.name||''));
   if(!filtered.length){ sel.innerHTML='<option value="">اس منصب میں کوئی ذمہ دار موجود نہیں</option>'; return; }
-  sel.innerHTML = '<option value="">-- ذمہ دار منتخب کریں --</option>' + filtered.map(u=>`<option value="${u.code}">${u.name} (${u.code})${u.profileLocked?' 🔒':''}</option>`).join('');
+  sel.innerHTML = '<option value="">-- ذمہ دار منتخب کریں --</option>' + filtered.map(u=>`<option value="${u.code}">${escapeHtml(u.name)} (${u.code})${u.profileLocked?' 🔒':''}</option>`).join('');
 }
 async function onAdminPickUserChange(){
   const code = document.getElementById('adminPickUser').value;
@@ -1469,10 +1527,10 @@ async function onAdminPickUserChangeForCode(code){
   await Promise.all([loadProfileIntoForm(), loadSlabsIntoForm()]);
   const bar=document.getElementById('viewingBar');
   bar.classList.remove('hidden');
-  bar.innerHTML = `آپ دیکھ رہے ہیں: <b>${u.name}</b> (${ROLE_LABELS[u.role]||u.role}) — <span class="back" onclick="backToOwnFromPicker()">میرے ریکارڈ پر واپس جائیں</span>`;
+  bar.innerHTML = `آپ دیکھ رہے ہیں: <b>${escapeHtml(u.name)}</b> (${ROLE_LABELS[u.role]||u.role}) — <span class="back" onclick="backToOwnFromPicker()">میرے ریکارڈ پر واپس جائیں</span>`;
   info.classList.remove('hidden');
   document.getElementById('adminClearMonthBox').classList.remove('hidden');
-  info.innerHTML = `موجودہ نام: <b>${u.name}</b> &nbsp;|&nbsp; موجودہ عہدہ: <b>${ROLE_LABELS[u.role]||u.role}</b>${u.profileLocked?' &nbsp;|&nbsp; <span style="color:#8B2E2E;">🔒 پروفائل لاک ہے</span>':''} — نیچے تفصیل میں تبدیلی کر کے "محفوظ کریں" دبائیں۔`;
+  info.innerHTML = `موجودہ نام: <b>${escapeHtml(u.name)}</b> &nbsp;|&nbsp; موجودہ عہدہ: <b>${ROLE_LABELS[u.role]||u.role}</b>${u.profileLocked?' &nbsp;|&nbsp; <span style="color:#8B2E2E;">🔒 پروفائل لاک ہے</span>':''} — نیچے تفصیل میں تبدیلی کر کے "محفوظ کریں" دبائیں۔`;
 }
 async function backToOwnFromPicker(){
   await backToOwn();
@@ -1525,7 +1583,7 @@ async function saveProfileData(){
       viewingUserObj.name=name;
       if(isAdmin) viewingUserObj.role=userDoc.role;
       viewingUserObj.districts=districtsArr; viewingUserObj.district=districtsArr[0]||'';
-      document.getElementById('viewingBar').innerHTML = `آپ دیکھ رہے ہیں: <b>${viewingUserObj.name}</b> (${ROLE_LABELS[viewingUserObj.role]||viewingUserObj.role}) — <span class="back" onclick="backToOwn()">میرے ریکارڈ پر واپس جائیں</span>`;
+      document.getElementById('viewingBar').innerHTML = `آپ دیکھ رہے ہیں: <b>${escapeHtml(viewingUserObj.name)}</b> (${ROLE_LABELS[viewingUserObj.role]||viewingUserObj.role}) — <span class="back" onclick="backToOwn()">میرے ریکارڈ پر واپس جائیں</span>`;
     }
   }
   const profile=getProfileFromForm();
@@ -1538,11 +1596,11 @@ async function changeOwnPin(){
   const newPin = document.getElementById('pNewPin').value.trim();
   if(!newPin){ toast('نیا پن درج کریں'); return; }
   const userDoc = await fsGet('users', currentUser.code);
-  if(!userDoc || userDoc.pin !== oldPin){ toast('موجودہ پن غلط ہے'); return; }
-  userDoc.pin = newPin;
+  if(!userDoc || !(await pinMatches(userDoc.pin, oldPin))){ toast('موجودہ پن غلط ہے'); return; }
+  userDoc.pin = await sha256Hex(newPin);
   const ok = await fsSet('users', currentUser.code, userDoc);
   if(ok){
-    currentUser.pin=newPin; toast('پن تبدیل ہو گیا ✓');
+    toast('پن تبدیل ہو گیا ✓');
     document.getElementById('pOldPin').value=''; document.getElementById('pNewPin').value='';
   } else toast('محفوظ کرنے میں خرابی');
 }
@@ -1553,7 +1611,7 @@ async function resetSubordinatePin(){
   const code = activeCode();
   const userDoc = await fsGet('users', code);
   if(!userDoc){ toast('اکاؤنٹ نہیں ملا'); return; }
-  userDoc.pin = newPin;
+  userDoc.pin = await sha256Hex(newPin);
   const ok = await fsSet('users', code, userDoc);
   if(ok){
     toast('پن ری سیٹ ہو گیا ✓ — نیا پن '+(viewingUserObj?viewingUserObj.name:code)+' کو بتا دیں');
@@ -1590,8 +1648,24 @@ async function toggleAccountStatus(){
   } else toast('محفوظ کرنے میں خرابی');
 }
 
+// FIX: pehle ye function saveProfileData() call karta tha, jo POORI profile (naam/ضلع/بینک/
+// بائیک وغیرہ) ko form mein jo bhi us waqt bhara hota — usi se overwrite kar deta tha. Agar
+// form theek se load nahi hua tha (ya kisi doosre zimmedar ka data abhi load ho raha tha —
+// race condition), to sirf mahina badalne se poori profile khali/غلط ہو جاتی تھی۔
+// FIX: ab ye SERVER se profile TAAZA (fresh) mangwata hai aur SIRF month/year field badalta
+// hai — baaqi tamam fields (bank, bike, district وغیرہ) ko chhoo tak nahi, is liye ab sirf
+// mahina badalne se profile kabhi corrupt/blank nahi ho sakti۔
+async function saveMonthYearOnly(month, year){
+  const code = activeCode();
+  const current = (await fsGet('profiles', code)) || {};
+  current.month = month;
+  current.year = year;
+  return await fsSet('profiles', code, current);
+}
 async function onMonthChange(){
-  await saveProfileData();
+  const month = parseInt(document.getElementById('pMonth').value);
+  const year = parseInt(document.getElementById('pYear').value) || new Date().getFullYear();
+  await saveMonthYearOnly(month, year);
   if(!document.getElementById('dailyTab').classList.contains('hidden')) await renderDaysList();
   if(!document.getElementById('petrolTab').classList.contains('hidden')) renderRateBreakdownPreview();
 }
@@ -1890,7 +1964,7 @@ function renderSubListRows(list){
   box.innerHTML = list.map(u=>`
     <div class="sub-row" style="${u.status==='closed'?'opacity:0.55;':''}${isAdmin?'align-items:center;':''}">
       ${isAdmin?`<input type="checkbox" class="sub-lock-check" value="${u.code}" style="margin-inline-end:8px;flex-shrink:0;" onclick="event.stopPropagation()">`:''}
-      <div style="cursor:pointer;flex:1;" onclick="openSubordinate('${u.code}')"><b>${u.name}</b> ${u.status==='closed'?'<span style="color:var(--danger);font-size:11px;font-weight:bold;">(بند)</span>':''}${u.profileLocked?' <span style="color:#8B2E2E;font-size:12px;">🔒 لاک</span>':''}<div class="role-tag">${ROLE_LABELS[u.role]||u.role} · ${displayDistricts(u)||u.division||''} (${u.code})</div></div>
+      <div style="cursor:pointer;flex:1;" onclick="openSubordinate('${u.code}')"><b>${escapeHtml(u.name)}</b> ${u.status==='closed'?'<span style="color:var(--danger);font-size:11px;font-weight:bold;">(بند)</span>':''}${u.profileLocked?' <span style="color:#8B2E2E;font-size:12px;">🔒 لاک</span>':''}<div class="role-tag">${ROLE_LABELS[u.role]||u.role} · ${displayDistricts(u)||u.division||''} (${u.code})</div></div>
       <div class="darrow" style="color:var(--gold);cursor:pointer;" onclick="openSubordinate('${u.code}')">›</div>
     </div>`).join('');
 }
@@ -1938,7 +2012,7 @@ async function openSubordinate(code){
   await Promise.all([loadProfileIntoForm(), loadSlabsIntoForm()]);
   const bar=document.getElementById('viewingBar');
   bar.classList.remove('hidden');
-  bar.innerHTML = `آپ دیکھ رہے ہیں: <b>${u.name}</b> (${ROLE_LABELS[u.role]||u.role}) — <span class="back" onclick="backToOwn()">میرے ریکارڈ پر واپس جائیں</span>`;
+  bar.innerHTML = `آپ دیکھ رہے ہیں: <b>${escapeHtml(u.name)}</b> (${ROLE_LABELS[u.role]||u.role}) — <span class="back" onclick="backToOwn()">میرے ریکارڈ پر واپس جائیں</span>`;
   showAppTab('daily');
 }
 async function backToOwn(){
@@ -2016,16 +2090,16 @@ async function renderSubmittedList(){
   await populateAdminDistrictFilter('submittedFilterDistrict','submittedDistrictWrap');
   const subs = await getSubordinates();
   const subMap={}; subs.forEach(u=>subMap[u.code]=u);
-  const allSubmitted = await fsListWhere('approvals','status','submitted');
-  let relevant = allSubmitted.filter(a=>subMap[a.code] && isRelevantSubmittedStage(a, subMap[a.code].role));
   const fMonthEl=document.getElementById('submittedFilterMonth');
   const fYearEl=document.getElementById('submittedFilterYear');
   const fMonth = fMonthEl ? fMonthEl.value : 'all';
-  const fYear = fYearEl && fYearEl.value ? parseInt(fYearEl.value,10) : null;
-  if(fMonth!=='all'){
-    const mNum=parseInt(fMonth,10);
-    relevant = relevant.filter(a=> a.month===mNum && (!fYear || a.year===fYear));
-  }
+  const fYear = fYearEl && fYearEl.value ? parseInt(fYearEl.value,10) : new Date().getFullYear();
+  // Jab koi khaas mahina select ho, seedha usi mahine ki (chhoti/tez) shard file se manga jata hai —
+  // "تمام مہینے" select karne par hi (kam istemal hone wala option) poora scan hota hai (dheema)۔
+  const allSubmitted = (fMonth!=='all')
+    ? await fsListWhere('approvals','status','submitted', fYear, parseInt(fMonth,10))
+    : await fsListWhere('approvals','status','submitted');
+  let relevant = allSubmitted.filter(a=>subMap[a.code] && isRelevantSubmittedStage(a, subMap[a.code].role));
   const fDistrictEl=document.getElementById('submittedFilterDistrict');
   const fDistrict = fDistrictEl ? fDistrictEl.value : '';
   if(fDistrict){
@@ -2038,7 +2112,7 @@ async function renderSubmittedList(){
     const u=subMap[a.code];
     return `<div class="sub-row" style="align-items:flex-start;flex-wrap:wrap;gap:8px;">
       <div style="cursor:pointer;flex:1;min-width:160px;" onclick="openSubmittedItem('${a.code}',${a.year},${a.month})">
-        <b>${u.name}</b><div class="role-tag">${ROLE_LABELS[u.role]||u.role} · ${urduMonths[a.month]} ${a.year} — مرحلہ: ${stageLabel(a.stage)} — آخری اپڈیٹ: ${new Date(a.at).toLocaleDateString('en-GB')}</div>
+        <b>${escapeHtml(u.name)}</b><div class="role-tag">${ROLE_LABELS[u.role]||u.role} · ${urduMonths[a.month]} ${a.year} — مرحلہ: ${stageLabel(a.stage)} — آخری اپڈیٹ: ${new Date(a.at).toLocaleDateString('en-GB')}</div>
       </div>
       <div style="display:flex;align-items:center;gap:8px;">
         <button class="btn-ghost btn-sm" onclick="previewLedgerFor('${a.code}',${a.year},${a.month},event)">👁️ پیش منظر</button>
@@ -2065,24 +2139,25 @@ async function openSubmittedItem(code, year, month){
   document.getElementById('pYear').value=year;
   const bar=document.getElementById('viewingBar');
   bar.classList.remove('hidden');
-  bar.innerHTML = `آپ دیکھ رہے ہیں: <b>${u.name}</b> (${ROLE_LABELS[u.role]||u.role}) — <span class="back" onclick="backToOwn()">میرے ریکارڈ پر واپس جائیں</span>`;
+  bar.innerHTML = `آپ دیکھ رہے ہیں: <b>${escapeHtml(u.name)}</b> (${ROLE_LABELS[u.role]||u.role}) — <span class="back" onclick="backToOwn()">میرے ریکارڈ پر واپس جائیں</span>`;
   showAppTab('daily');
 }
 async function updateSubmittedBadgeCount(){
   const tab=document.getElementById('tabSubmitted');
   if(!tab) return;
   if((currentUser.role||'box')==='box'){ return; }
+  const now = new Date();
   const [subs, allSubmitted, allApproved] = await Promise.all([
     getSubordinates(),
-    fsListWhere('approvals','status','submitted'),
-    fsListWhere('approvals','status','approved')
+    fsListWhere('approvals','status','submitted', now.getFullYear(), now.getMonth()),
+    fsListWhere('approvals','status','approved', now.getFullYear(), now.getMonth())
   ]);
-  const subCodes = new Set(subs.map(u=>u.code));
-  const count = allSubmitted.filter(a=>subCodes.has(a.code) && isRelevantSubmittedStage(a)).length;
+  const subMap={}; subs.forEach(u=>subMap[u.code]=u);
+  const count = allSubmitted.filter(a=>subMap[a.code] && isRelevantSubmittedStage(a, subMap[a.code].role)).length;
   tab.innerHTML = `<span class="ic">📥</span>جمع شدہ${count?(' ('+count+')'):''}`;
   const vTab=document.getElementById('tabVerified');
   if(vTab){
-    const vCount = allApproved.filter(a=>subCodes.has(a.code)).length + allSubmitted.filter(a=>subCodes.has(a.code) && isAwaitingFinanceStage(a)).length;
+    const vCount = allApproved.filter(a=>subMap[a.code]).length + allSubmitted.filter(a=>subMap[a.code] && isAwaitingFinanceStage(a)).length;
     vTab.innerHTML = `<span class="ic">✅</span>تصدیق شدہ${vCount?(' ('+vCount+')'):''}`;
   }
 }
@@ -2100,22 +2175,28 @@ async function renderVerifiedList(){
   const subs = await getSubordinates();
   const subMap={}; subs.forEach(u=>subMap[u.code]=u);
 
-  const allApproved = await fsListWhere('approvals','status','approved');
-  const approvedItems = allApproved.filter(a=>subMap[a.code]).map(a=>({...a,_kind:'approved'}));
+  const fMonthEl=document.getElementById('verifiedFilterMonth');
+  const fYearEl=document.getElementById('verifiedFilterYear');
+  const fMonth = fMonthEl ? fMonthEl.value : 'all';
+  const fYear = fYearEl && fYearEl.value ? parseInt(fYearEl.value,10) : new Date().getFullYear();
 
-  const allSubmitted = await fsListWhere('approvals','status','submitted');
+  // Jab koi khaas mahina select ho, seedha usi mahine ki (chhoti/tez) shard file se manga jata hai —
+  // "تمام مہینے" select karne par hi (kam istemal hone wala option) poora scan hota hai (dheema)۔
+  const [allApproved, allSubmitted] = (fMonth!=='all')
+    ? await Promise.all([
+        fsListWhere('approvals','status','approved', fYear, parseInt(fMonth,10)),
+        fsListWhere('approvals','status','submitted', fYear, parseInt(fMonth,10))
+      ])
+    : await Promise.all([
+        fsListWhere('approvals','status','approved'),
+        fsListWhere('approvals','status','submitted')
+      ]);
+
+  const approvedItems = allApproved.filter(a=>subMap[a.code]).map(a=>({...a,_kind:'approved'}));
   const awaitingItems = allSubmitted.filter(a=>subMap[a.code] && (isAwaitingFinanceStage(a) || isViewOnlyFinanceStageForDistrict(a)))
     .map(a=>({...a,_kind:'awaiting_finance', _viewOnly: isViewOnlyFinanceStageForDistrict(a)}));
 
   let relevant = [...awaitingItems, ...approvedItems];
-  const fMonthEl=document.getElementById('verifiedFilterMonth');
-  const fYearEl=document.getElementById('verifiedFilterYear');
-  const fMonth = fMonthEl ? fMonthEl.value : 'all';
-  const fYear = fYearEl && fYearEl.value ? parseInt(fYearEl.value,10) : null;
-  if(fMonth!=='all'){
-    const mNum=parseInt(fMonth,10);
-    relevant = relevant.filter(a=> a.month===mNum && (!fYear || a.year===fYear));
-  }
   const fDistrictEl=document.getElementById('verifiedFilterDistrict');
   const fDistrict = fDistrictEl ? fDistrictEl.value : '';
   if(fDistrict){
@@ -2146,7 +2227,7 @@ async function renderVerifiedList(){
     return `<div class="sub-row" style="align-items:flex-start;flex-wrap:wrap;gap:8px;">
       <label style="display:flex;align-items:center;gap:8px;flex:1;min-width:160px;cursor:${isAwaiting?'default':'pointer'};">
         ${checkbox}
-        <span><b>${u.name}</b><div class="role-tag">${ROLE_LABELS[u.role]||u.role} · ${urduMonths[a.month]} ${a.year} — ${statusTxt}</div></span>
+        <span><b>${escapeHtml(u.name)}</b><div class="role-tag">${ROLE_LABELS[u.role]||u.role} · ${urduMonths[a.month]} ${a.year} — ${statusTxt}</div></span>
       </label>
       <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
         <button class="btn-ghost btn-sm" onclick="previewLedgerFor('${a.code}',${a.year},${a.month},event)">👁️</button>
@@ -2841,9 +2922,9 @@ async function renderDistrictReport(){
   const box = document.getElementById('distReportBody');
   box.innerHTML = '<div class="empty">لوڈ ہو رہا ہے...</div>';
   const globalCfg = await loadGlobalPetrolConfig();
-  const allApprovals = await fsListAll('approvals');
+  const allApprovals = await fsListWhere('approvals','month', month, year, month);
   const apprMap = {};
-  allApprovals.filter(a=>a.year===year && a.month===month).forEach(a=>apprMap[a.code]=a);
+  allApprovals.forEach(a=>apprMap[a.code]=a);
 
   const fDistrictEl = document.getElementById('distReportDistrict');
   const fDistrictRaw = fDistrictEl ? fDistrictEl.value : '';
@@ -3012,12 +3093,12 @@ async function openDayEditor(dateStr){
   if(res) e=res;
   currentDayPhotos={start:e.meterStartPhoto||null, end:e.meterEndPhoto||null};
   const d=parseLocalDate(dateStr); const dayName=urduDays[d.getDay()];
-  const editFlag = e.editedBy ? `<div class="edit-flag">✏️ اس اندراج میں آخری ترمیم: <b>${e.editedBy.name}</b> (${ROLE_LABELS[e.editedBy.role]||e.editedBy.role})</div>` : '';
+  const editFlag = e.editedBy ? `<div class="edit-flag">✏️ اس اندراج میں آخری ترمیم: <b>${escapeHtml(e.editedBy.name)}</b> (${ROLE_LABELS[e.editedBy.role]||e.editedBy.role})</div>` : '';
   const lockNote = locked ? `<div class="warn-note">🔒 یہ مہینہ جمع کروایا جا چکا ہے — آپ خود ترمیم نہیں کر سکتے۔ نیچے ریمارکس میں پیغام بھیجا جا سکتا ہے۔</div>` : '';
   const dis = locked ? 'disabled' : '';
   const remarkCount = (e.remarks && e.remarks.length) || 0;
   const remarksHtml = remarkCount
-    ? e.remarks.map(r=>`<div style="margin-bottom:6px;padding-bottom:6px;border-bottom:1px dashed var(--line);font-size:12px;"><b style="color:var(--brand-dark);">${r.by.name}</b> <span style="color:var(--muted);">(${ROLE_LABELS[r.by.role]||r.by.role})</span> — <span style="color:var(--muted);">${new Date(r.at).toLocaleString('en-GB')}</span><br>${r.text}</div>`).join('')
+    ? e.remarks.map(r=>`<div style="margin-bottom:6px;padding-bottom:6px;border-bottom:1px dashed var(--line);font-size:12px;"><b style="color:var(--brand-dark);">${escapeHtml(r.by.name)}</b> <span style="color:var(--muted);">(${ROLE_LABELS[r.by.role]||r.by.role})</span> — <span style="color:var(--muted);">${new Date(r.at).toLocaleString('en-GB')}</span><br>${escapeHtml(r.text)}</div>`).join('')
     : '<div style="color:var(--muted);font-size:12px;">ابھی کوئی ریمارک/جواب نہیں</div>';
   slot.innerHTML = `
     <div class="editor">
@@ -3025,10 +3106,10 @@ async function openDayEditor(dateStr){
       ${editFlag}
       ${lockNote}
       <div class="row2">
-        <div class="field"><label>سفر کہاں سے شروع کیا (روانگی)</label><input type="text" id="eTravelFrom" value="${e.travelFrom||''}" placeholder="مثلاً دفتر" ${dis}></div>
-        <div class="field"><label>سفر کہاں ختم کیا (اختتام)</label><input type="text" id="eTravelTo" value="${e.travelTo||''}" placeholder="مثلاً مارکیٹ" ${dis}></div>
+        <div class="field"><label>سفر کہاں سے شروع کیا (روانگی)</label><input type="text" id="eTravelFrom" value="${escapeHtml(e.travelFrom||'')}" placeholder="مثلاً دفتر" ${dis}></div>
+        <div class="field"><label>سفر کہاں ختم کیا (اختتام)</label><input type="text" id="eTravelTo" value="${escapeHtml(e.travelTo||'')}" placeholder="مثلاً مارکیٹ" ${dis}></div>
       </div>
-      <div class="field"><label>مصروفیت کی تفصیل</label><input type="text" id="eActivity" value="${e.activity||''}" ${dis}></div>
+      <div class="field"><label>مصروفیت کی تفصیل</label><input type="text" id="eActivity" value="${escapeHtml(e.activity||'')}" ${dis}></div>
       <div class="row2">
         <div class="field"><label>میٹر ریڈنگ - ابتدا</label><input type="number" id="eMeterStart" value="${e.meterStart||''}" oninput="onMeterChange()" ${dis}></div>
         <div class="field"><label>میٹر ریڈنگ - انتہا</label><input type="number" id="eMeterEnd" value="${e.meterEnd||''}" oninput="onMeterChange()" ${dis}></div>
