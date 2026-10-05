@@ -1657,7 +1657,8 @@ async function toggleAccountStatus(){
 // mahina badalne se profile kabhi corrupt/blank nahi ho sakti۔
 async function saveMonthYearOnly(month, year){
   const code = activeCode();
-  const current = (await fsGet('profiles', code)) || {};
+  const current = await fsGet('profiles', code);
+  if(!current || !current.code) return false;
   current.month = month;
   current.year = year;
   return await fsSet('profiles', code, current);
