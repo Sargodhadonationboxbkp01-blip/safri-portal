@@ -427,8 +427,14 @@
           <input type="checkbox" id="globalPetrolEnabled">
           <label for="globalPetrolEnabled" style="margin:0;">تمام ذمہ داران کے لیے یہی ریٹ خودکار لاگو کریں</label>
         </div>
+        <div class="row2">
+          <div class="field"><label>مہینہ منتخب کریں (صرف اسی مہینے کے ریٹ دیکھنے/بدلنے کے لیے)</label><select id="globalSlabMonth" onchange="onGlobalSlabFilterChange()"></select></div>
+          <div class="field"><label>سال</label><input type="number" id="globalSlabYear" onchange="onGlobalSlabFilterChange()"></div>
+        </div>
+        <div class="note" id="globalSlabCount"></div>
         <div id="globalSlabList"></div>
         <button class="btn-primary btn-sm" onclick="addGlobalSlabRow()">+ نیا عالمی ریٹ شامل کریں</button>
+        <div id="globalRateBreakdownPreview"></div>
         <div class="field" style="margin-top:14px;">
           <label>عالمی ڈیفالٹ ریٹ</label>
           <input type="number" id="globalDefaultRate" step="0.01">
@@ -1365,6 +1371,7 @@ async function onAssignDistrictChange(keepSupervisor){
 async function onAssignSupervisorChange(){
   await renderAssignSupBoxList();
 }
+let assignSupShownCodes=[]; // is waqt screen par (is ضلع کے) جتنے باکس ذمہ دار دکھائے جا رہے ہیں
 async function renderAssignSupBoxList(){
   const district = document.getElementById('assignDistrictSel').value;
   const supCode = document.getElementById('assignSupervisorSel').value;
@@ -1376,6 +1383,7 @@ async function renderAssignSupBoxList(){
   const dNorm = normLoc(district);
   const boxUsers = all.filter(u=>u.role==='box' && u.status!=='closed' && userDistricts(u).includes(dNorm)).sort((a,b)=>a.name.localeCompare(b.name));
   if(!boxUsers.length){ listEl.innerHTML='<div class="empty">اس ضلع میں کوئی باکس ذمہ دار رجسٹرڈ نہیں۔</div>'; saveBtn.disabled=true; return; }
+  assignSupShownCodes = boxUsers.map(u=>u.code);
 
   const allSupervisors = all.filter(u=>u.role==='supervisor');
   const assignedToMap = {}; // boxCode -> {code,name} of whichever supervisor currently has them
@@ -1400,12 +1408,18 @@ async function renderAssignSupBoxList(){
 async function saveDistrictAssignments(){
   const supCode = document.getElementById('assignSupervisorSel').value;
   if(!supCode){ toast('پہلے سپروائزر منتخب کریں'); return; }
-  const codes = Array.from(document.querySelectorAll('.assign-sup-box-check:checked')).map(el=>el.value);
+  const checkedCodes = Array.from(document.querySelectorAll('.assign-sup-box-check:checked')).map(el=>el.value);
   const userDoc = await fsGet('users', supCode);
   if(!userDoc){ toast('سپروائزر کا ریکارڈ نہیں ملا'); return; }
+  // FIX: پہلے یہاں پوری فہرست صرف اسی ضلع کے منتخب لوگوں سے بدل دی جاتی تھی، جس سے دوسرے ضلع کے
+  // پہلے سے تفویض شدہ ذمہ داران خود بخود ان-اسائن ہو جاتے تھے۔ اب صرف وہی لوگ بدلتے ہیں جو اس وقت
+  // اسکرین پر (اسی ضلع کے) دکھائے گئے ہیں؛ باقی اضلاع کے تفویض شدہ جوں کے توں رہتے ہیں۔
+  const shown = new Set(assignSupShownCodes);
+  const kept = (userDoc.assignedBoxCodes||[]).filter(c=>!shown.has(c));
+  const codes = Array.from(new Set(kept.concat(checkedCodes)));
   userDoc.assignedBoxCodes = codes;
   const ok = await fsSet('users', supCode, userDoc);
-  if(ok){ toast('Assignment محفوظ ہو گئی ✓ ('+codes.length+' باکس ذمہ دار منتخب)'); renderAssignSupBoxList(); }
+  if(ok){ toast('Assignment محفوظ ہو گئی ✓ (اس ضلع کے '+checkedCodes.length+' منتخب — اس سپروائزر کے کل '+codes.length+' باکس ذمہ دار)'); renderAssignSupBoxList(); }
   else toast('محفوظ کرنے میں خرابی');
 }
 async function unassignBoxDirect(boxCode, fromSupervisorCode){
@@ -1719,6 +1733,7 @@ async function loadSlabsIntoForm(){
     document.getElementById('globalPetrolEnabled').checked = !!globalCfg.enabled;
     globalSlabsCache = globalCfg.slabs||[];
     document.getElementById('globalDefaultRate').value = globalCfg.defaultRate||0;
+    initGlobalSlabFilter();
     renderGlobalSlabList();
   }
   const viewedRole = viewingUserObj ? viewingUserObj.role : (currentUser.role||'box');
@@ -1757,26 +1772,86 @@ function rateForDate(dateStr, slabs, defaultRate){
 
 /* ---------------- global petrol rate (admin-controlled, applies to everyone except admin) ---------------- */
 let globalSlabsCache=[];
+let _globalSlabFilterReady=false;
+function initGlobalSlabFilter(){
+  if(_globalSlabFilterReady) return;
+  fillMonthFilterSelect('globalSlabMonth');
+  const now=new Date();
+  document.getElementById('globalSlabMonth').value=String(now.getMonth());
+  document.getElementById('globalSlabYear').value=now.getFullYear();
+  _globalSlabFilterReady=true;
+}
+function globalSlabFilterRange(){
+  const m=document.getElementById('globalSlabMonth').value;
+  const y=parseInt(document.getElementById('globalSlabYear').value,10);
+  if(m==='all' || !y) return null;
+  const mi=parseInt(m,10);
+  return {first:localDateStr(new Date(y,mi,1)), last:localDateStr(new Date(y,mi+1,0)), mi, y};
+}
 function globalSlabRowHTML(idx, slab){
   return `<div class="slab-row" data-idx="${idx}">
-    <input type="date" class="globalSlabStart" value="${slab.start||''}">
-    <input type="date" class="globalSlabEnd" value="${slab.end||''}">
-    <input type="number" step="0.01" class="globalSlabRate" value="${slab.rate||''}" placeholder="ریٹ">
+    <input type="date" class="globalSlabStart" value="${slab.start||''}" onchange="renderGlobalRateBreakdown()">
+    <input type="date" class="globalSlabEnd" value="${slab.end||''}" onchange="renderGlobalRateBreakdown()">
+    <input type="number" step="0.01" class="globalSlabRate" value="${slab.rate||''}" placeholder="ریٹ" oninput="renderGlobalRateBreakdown()">
     <span class="rm" onclick="removeGlobalSlabRow(${idx})">✕</span>
   </div>`;
 }
-function renderGlobalSlabList(){
-  document.getElementById('globalSlabList').innerHTML = globalSlabsCache.map((s,i)=>globalSlabRowHTML(i,s)).join('') || '<div class="empty">ابھی کوئی عالمی ریٹ درج نہیں</div>';
-}
-function addGlobalSlabRow(){ globalSlabsCache.push({start:'',end:'',rate:''}); renderGlobalSlabList(); }
-function removeGlobalSlabRow(idx){ globalSlabsCache.splice(idx,1); renderGlobalSlabList(); }
-function collectGlobalSlabsFromDOM(){
-  const rows=document.querySelectorAll('#globalSlabList .slab-row'); const slabs=[];
-  rows.forEach(row=>{
-    const start=row.querySelector('.globalSlabStart').value, end=row.querySelector('.globalSlabEnd').value, rate=parseFloat(row.querySelector('.globalSlabRate').value)||0;
-    if(start&&end) slabs.push({start,end,rate});
+// جو قطاریں اس وقت اسکرین پر ہیں، ان میں کی گئی تبدیلیاں مکمل فہرست (cache) میں لکھ دیتا ہے —
+// فلٹر کی وجہ سے چھپے ہوئے (دوسرے مہینوں کے) ریٹ اسی طرح محفوظ رہتے ہیں۔
+function syncGlobalSlabsFromDOM(){
+  document.querySelectorAll('#globalSlabList .slab-row').forEach(row=>{
+    const idx=parseInt(row.dataset.idx,10);
+    if(isNaN(idx) || !globalSlabsCache[idx]) return;
+    globalSlabsCache[idx]={
+      start: row.querySelector('.globalSlabStart').value,
+      end: row.querySelector('.globalSlabEnd').value,
+      rate: parseFloat(row.querySelector('.globalSlabRate').value)||0
+    };
   });
-  return slabs;
+}
+function renderGlobalSlabList(){
+  const rng=globalSlabFilterRange();
+  const rows=[];
+  globalSlabsCache.forEach((s,i)=>{
+    const incomplete=!s.start || !s.end; // نئی (ابھی مکمل نہ بھری ہوئی) قطار ہر فلٹر میں نظر آتی ہے
+    if(!rng || incomplete || (s.start<=rng.last && s.end>=rng.first)) rows.push(globalSlabRowHTML(i,s));
+  });
+  document.getElementById('globalSlabList').innerHTML = rows.join('') || (rng ? '<div class="empty">اس مہینے کے لیے کوئی عالمی ریٹ درج نہیں</div>' : '<div class="empty">ابھی کوئی عالمی ریٹ درج نہیں</div>');
+  document.getElementById('globalSlabCount').textContent = rng
+    ? (urduMonths[rng.mi]+' '+rng.y+' کے ریٹ: '+rows.length+' (کل محفوظ ریٹ: '+globalSlabsCache.length+') — "تمام مہینے" منتخب کر کے سب دیکھ سکتے ہیں۔')
+    : ('تمام مہینوں کے ریٹ: '+rows.length);
+  renderGlobalRateBreakdown();
+}
+function addGlobalSlabRow(){
+  syncGlobalSlabsFromDOM();
+  const rng=globalSlabFilterRange();
+  globalSlabsCache.push({start: rng?rng.first:'', end: rng?rng.last:'', rate:''}); // منتخب مہینے کی پہلی/آخری تاریخ پہلے سے بھری ہوئی
+  renderGlobalSlabList();
+}
+function removeGlobalSlabRow(idx){ syncGlobalSlabsFromDOM(); globalSlabsCache.splice(idx,1); renderGlobalSlabList(); }
+function onGlobalSlabFilterChange(){ syncGlobalSlabsFromDOM(); renderGlobalSlabList(); }
+function collectGlobalSlabsFromDOM(){
+  syncGlobalSlabsFromDOM();
+  return globalSlabsCache.filter(s=>s.start&&s.end).map(s=>({start:s.start,end:s.end,rate:s.rate}));
+}
+// منتخب مہینے میں کس تاریخ سے کس تاریخ تک کون سا عالمی ریٹ لاگو ہو گا (محفوظ کرنے سے پہلے بھی نظر آتا ہے)
+async function renderGlobalRateBreakdown(){
+  const el=document.getElementById('globalRateBreakdownPreview');
+  if(!el) return;
+  const rng=globalSlabFilterRange();
+  if(!rng){ el.innerHTML=''; return; }
+  const slabs=globalSlabsCache.map((s,i)=>s).filter(s=>s.start&&s.end);
+  // قطاروں میں ابھی لکھی جا رہی تبدیلیاں بھی شامل کریں
+  document.querySelectorAll('#globalSlabList .slab-row').forEach(row=>{
+    const idx=parseInt(row.dataset.idx,10); if(isNaN(idx) || !globalSlabsCache[idx]) return;
+    const s={start:row.querySelector('.globalSlabStart').value,end:row.querySelector('.globalSlabEnd').value,rate:parseFloat(row.querySelector('.globalSlabRate').value)||0};
+    const pos=slabs.indexOf(globalSlabsCache[idx]);
+    if(s.start&&s.end){ if(pos>-1) slabs[pos]=s; else slabs.push(s); } else if(pos>-1){ slabs.splice(pos,1); }
+  });
+  const defaultRate=parseFloat(document.getElementById('globalDefaultRate').value)||0;
+  const groups=await getRateBreakdownForMonth(slabs, defaultRate, rng.y, rng.mi, null);
+  el.innerHTML = '<div class="note" style="margin-top:10px;"><b>'+urduMonths[rng.mi]+' '+rng.y+' کا ریٹ بریک ڈاؤن:</b><br>' +
+    groups.map(g=> (g.start===g.end? g.start : g.start+' تا '+g.end) + ' — ریٹ: <b>'+fmtNum(g.rate)+'</b>' + (g.isDefault?' (ڈیفالٹ ریٹ)':' (متعین ریٹ)')).join('<br>') + '</div>';
 }
 async function saveGlobalPetrol(){
   globalSlabsCache = collectGlobalSlabsFromDOM();
@@ -1841,6 +1916,8 @@ function showAppTab(which){
   document.getElementById('reportsTab').classList.toggle('hidden', which!=='reports');
   document.getElementById('dangerZoneCard').classList.toggle('hidden', which!=='adduser');
   document.getElementById('pdfTab').classList.toggle('hidden', which!=='pdf');
+  // FIX: عالمی پٹرول ریٹ کا کارڈ پہلے پٹرول ٹیب کھولنے کے بعد ہر دوسرے ٹیب پر بھی اوپر نظر آتا رہتا تھا
+  document.getElementById('globalPetrolCard').classList.toggle('hidden', !(which==='petrol' && currentUser && currentUser.role==='admin' && !viewingCode));
   if(which==='dashboard'){
     renderDashboard();
   }
@@ -4040,7 +4117,7 @@ Object.assign(window, {
   doLogin, adminCreateUser, onRegRoleChange, onProfileRoleChange, quickFill, deleteAllData,
   toggleBulkMode, addBulkRow, removeBulkRow, saveAssignedBoxes, handleSignatureFileUpload,
   saveProfileData, onMonthChange, shiftMonth, addSlabRow, removeSlabRow, saveSlabs, renderRateBreakdownPreview,
-  addGlobalSlabRow, removeGlobalSlabRow, saveGlobalPetrol,
+  addGlobalSlabRow, removeGlobalSlabRow, saveGlobalPetrol, onGlobalSlabFilterChange, renderGlobalRateBreakdown,
   showAppTab, doLogout, openSubordinate, backToOwn, openSubmittedItem, quickSendBack,
   toggleSelectAllVerified, downloadSingleVerifiedPdf, bulkDownloadVerifiedPdf, downloadDistrictExcelSummary,
   previewCurrentLedger, previewLedgerFor, closePreviewModal, approveFromPreview, sendBackFromPreview,
