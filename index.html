@@ -766,7 +766,12 @@ async function _apiCall(action, params, bodyObj, _isRetry){
   return json;
 }
 async function fsGet(col,id){
-  try{ const r = await _apiCall('get', {col, id}); return r.data; }
+  try{ const params = {col, id}; if(col==='entries') params.slim = '1'; /* photos ke baghair halka record */ const r = await _apiCall('get', params); return r.data; }
+  catch(e){ console.error(e); toast('سرور سے ڈیٹا لینے میں خرابی — انٹرنیٹ/سرور چیک کریں'); return null; }
+}
+// Sirf din ka editor kholte waqt istemal hota hai: poora record, photos samet
+async function fsGetEntryFull(id){
+  try{ const r = await _apiCall('get', {col:'entries', id}); return r.data; }
   catch(e){ console.error(e); toast('سرور سے ڈیٹا لینے میں خرابی — انٹرنیٹ/سرور چیک کریں'); return null; }
 }
 async function fsSet(col,id,data){
@@ -787,6 +792,11 @@ async function fsSet(col,id,data){
 async function fsDelete(col,id){
   try{ await _apiCall('delete', {col, id}, {}); _fsInvalidate(col); return true; }
   catch(e){ console.error(e); return false; }
+}
+// Admin: ek zimmedar ke ek mahine ki meter photos server par EK HI BAAR mein hatana (baqi entry mehfooz)
+async function fsDeleteMonthPhotos(code, year, month){
+  try{ const r = await _apiCall('delete-photos', {col:'entries', code, year, month}); _fsInvalidate('entries'); return r.count||0; }
+  catch(e){ console.error(e); return -1; }
 }
 async function fsListAll(col){
   const now=Date.now();
@@ -809,6 +819,7 @@ async function fsListWhere(col, field, value, year, month){
   if(c && (now-c.t)<FS_CACHE_TTL) return c.data;
   try{
     const extra = {col, field, value};
+    if(col==='entries') extra.slim = '1'; // photos ke baghair — list tez rahe
     if(year!==undefined && year!==null) extra.year = year;
     if(month!==undefined && month!==null) extra.month = month;
     const r = await _apiCall('list-where', extra);
@@ -2674,15 +2685,9 @@ async function adminDeletePhotos(which){
   toast('تصاویر حذف ہو رہی ہیں...');
   let count=0;
   if(which==='meter' || which==='both'){
-    const monthMap = await getMonthEntryMapFor(code, year, month);
-    for(const dateStr of Object.keys(monthMap)){
-      const e = monthMap[dateStr];
-      if(e.meterStartPhoto || e.meterEndPhoto){
-        e.meterStartPhoto=null; e.meterEndPhoto=null;
-        const ok = await fsSet('entries', code+'_'+dateStr, e);
-        if(ok) count++;
-      }
-    }
+    const n = await fsDeleteMonthPhotos(code, year, month);
+    if(n<0){ toast('تصاویر حذف کرنے میں خرابی — دوبارہ کوشش کریں'); return; }
+    count = n;
   }
   if(which==='tickets' || which==='both'){
     await fsDelete('attachments', attachmentDocId(code, year, month));
@@ -2701,6 +2706,7 @@ async function adminClearMonthEntries(){
   const sure2 = confirm('یہ حتمی تصدیق ہے — یہ عمل واپس نہیں کیا جا سکتا۔ جاری رکھیں؟');
   if(!sure2) return;
   toast('صاف کیا جا رہا ہے...');
+  await fsDeleteMonthPhotos(code, year, month);
   const monthMap = await getMonthEntryMapFor(code, year, month);
   let count=0;
   for(const dateStr of Object.keys(monthMap)){
@@ -3079,6 +3085,7 @@ function toggleDayEditor(dateStr){
   else { openDayEditor(dateStr); }
 }
 let currentDayPhotos={start:null, end:null};
+let originalDayPhotos={start:null, end:null}; // din kholte waqt ki photos — taake sirf badli hui photo hi bheji jaye
 let pendingPhotoUploads={start:null, end:null};
 async function openDayEditor(dateStr){
   if(openDayDate && openDayDate!==dateStr){
@@ -3090,9 +3097,10 @@ async function openDayEditor(dateStr){
   if(!slot) return;
   slot.innerHTML='<div class="editor"><div class="empty">لوڈ ہو رہا ہے...</div></div>';
   let e={date:dateStr, travel:'', travelFrom:'', travelTo:'', activity:'', meterStart:'', meterEnd:'', km:'', fare:''};
-  const [res, locked] = await Promise.all([ fsGet('entries', entryDocId(dateStr)), isMonthLockedForOwner() ]);
+  const [res, locked] = await Promise.all([ fsGetEntryFull(entryDocId(dateStr)), isMonthLockedForOwner() ]);
   if(res) e=res;
   currentDayPhotos={start:e.meterStartPhoto||null, end:e.meterEndPhoto||null};
+  originalDayPhotos={start:currentDayPhotos.start, end:currentDayPhotos.end};
   const d=parseLocalDate(dateStr); const dayName=urduDays[d.getDay()];
   const editFlag = e.editedBy ? `<div class="edit-flag">✏️ اس اندراج میں آخری ترمیم: <b>${escapeHtml(e.editedBy.name)}</b> (${ROLE_LABELS[e.editedBy.role]||e.editedBy.role})</div>` : '';
   const lockNote = locked ? `<div class="warn-note">🔒 یہ مہینہ جمع کروایا جا چکا ہے — آپ خود ترمیم نہیں کر سکتے۔ نیچے ریمارکس میں پیغام بھیجا جا سکتا ہے۔</div>` : '';
@@ -3257,7 +3265,9 @@ async function saveDayEntry(){
     code:activeCode(), date:openDayDate, travelFrom, travelTo, travel, activity:document.getElementById('eActivity').value.trim(),
     meterStart, meterEnd, km, fare:parseFloat(document.getElementById('eFare').value)||0,
     maintenance:km*2,
-    meterStartPhoto: currentDayPhotos.start||null, meterEndPhoto: currentDayPhotos.end||null,
+    // photo sirf tab bheji jati hai jab badli ho (nayi lagi, ya hatai gayi) — warna server purani photo jas ki tas rakhta hai
+    ...(currentDayPhotos.start!==originalDayPhotos.start ? {meterStartPhoto: currentDayPhotos.start||null} : {}),
+    ...(currentDayPhotos.end!==originalDayPhotos.end ? {meterEndPhoto: currentDayPhotos.end||null} : {}),
     remarks: (existing && existing.remarks) || [],
   };
   if(viewingCode && viewingCode!==currentUser.code){
