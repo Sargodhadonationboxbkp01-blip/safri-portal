@@ -732,14 +732,21 @@ const CONFIG_IS_SET = !!(BACKEND_URL && !BACKEND_URL.includes("YOUR_DEPLOYMENT_I
 const _fsCache = { listAll:{}, listWhere:{} };
 const FS_CACHE_TTL = 20000; // 20 seconds
 const _getMemo = {}; // col::id -> {t, p}  (sirf fsGetCached istemal karta hai)
-const GET_MEMO_TTL = {config:60000, approvals:30000};
+const GET_MEMO_TTL = {config:60000, approvals:30000, users:20000, profiles:20000, slabs:20000};
 function cloneJson(v){ return (v===null||v===undefined) ? v : JSON.parse(JSON.stringify(v)); }
 function _fsInvalidate(col){
   Object.keys(_getMemo).forEach(k=>{ if(k.indexOf(col+'::')===0) delete _getMemo[k]; });
   delete _fsCache.listAll[col];
   Object.keys(_fsCache.listWhere).forEach(k=>{ if(k.indexOf(col+'::')===0) delete _fsCache.listWhere[k]; });
 }
+const _speedLog=[]; // har call ka waqt (sirf ?speed=1 par panel mein dikhta hai)
+function _logSpeed(action, params, totalMs, serverMs){
+  const p=params||{};
+  _speedLog.push({at:new Date().toLocaleTimeString('en-GB'), what:action+' '+(p.col||'')+((p.id||p.code)?(' '+(p.id||p.code)):''), total:Math.round(totalMs), server:(typeof serverMs==='number'?serverMs:null)});
+  if(_speedLog.length>60) _speedLog.shift();
+}
 async function _apiCall(action, params, bodyObj, _isRetry){
+  const _t0 = performance.now();
   const url = new URL(BACKEND_URL);
   url.searchParams.set('action', action);
   url.searchParams.set('key', API_KEY);
@@ -764,6 +771,7 @@ async function _apiCall(action, params, bodyObj, _isRetry){
     throw networkErr;
   }
   const json = await res.json();
+  _logSpeed(action, params, performance.now()-_t0, json && json.serverMs);
   if(json && json.error){
     // Yeh server ne khud bataya hai (misal: masroof hai, ya din ki hadd puri ho gayi) — is
     // par foran dobara koshish karne se koi faida nahi (behtar nahi hoga), sirf waqt aur
@@ -1159,18 +1167,38 @@ async function deleteAllData(){
     toast('حذف کرنے کے دوران خرابی ہوئی — انٹرنیٹ چیک کر کے دوبارہ کوشش کریں');
   }
 }
+// Login ke saath hi dashboard ka sara data EK hi server call mein. Purana server ho ya koi hissa nakam ho to null milta hai
+// aur login/dashboard purane (kai calls wale) tareeqe se chalte hain — yani kuch bigarta nahi.
+async function bootstrapFor(code){
+  try{
+    const r = await _apiCall('bootstrap', {code});
+    if(!r || r.errors || r.user===undefined) return null;
+    return r;
+  }catch(e){ console.error('bootstrap nakam (purana tareeqa istemal hoga):', e); return null; }
+}
+function primeCachesFromBootstrap(code, b){
+  const now=Date.now();
+  const put=(col,id,data)=>{ _getMemo[col+'::'+id]={t:now, p:Promise.resolve({ok:true, data})}; };
+  put('users', code, b.user); put('profiles', code, b.profile); put('slabs', code, b.slabs);
+  if(b.config){ put('config','global', b.config.global); put('config','globalPetrol', b.config.globalPetrol); }
+  if(b.approvalId && b.approval!==undefined) put('approvals', b.approvalId, b.approval);
+  if(b.entries) _fsCache.listWhere['entries::code::'+code+'::::']={data:b.entries, t:now};
+  if(b.usersAll) _fsCache.listAll['users']={data:b.usersAll, t:now};
+}
 async function doLogin(){
   const btn=document.getElementById('loginBtn');
   const code=document.getElementById('loginCode').value.trim();
   const pin=document.getElementById('loginPin').value.trim();
   if(!code||!pin){toast('آئی ڈی اور پن درج کریں');return;}
   btn.disabled=true; toast('لاگ ان ہو رہا ہے...');
-  const user = await fsGet('users', code);
+  const boot = await bootstrapFor(code);
+  const user = boot ? boot.user : await fsGet('users', code);
   if(!user){toast('اکاؤنٹ نہیں ملا');btn.disabled=false;return;}
   if(!(await pinMatches(user.pin, pin))){toast('پن غلط ہے');btn.disabled=false;return;}
   if(user.status==='closed'){toast('یہ آئی ڈی بند کر دی گئی ہے — ایڈمن سے رابطہ کریں');btn.disabled=false;return;}
   if(!user.role) user.role='box';
   btn.disabled=false;
+  if(boot) primeCachesFromBootstrap(code, boot); // dashboard ka data pehle se mil chuka hai — dobara server ko nahi jana
   user.lastLogin = new Date().toISOString();
   if(!looksHashed(user.pin)) user.pin = await sha256Hex(pin); // purani plaintext PIN ko khamoshi se hash mein badal dein
   fsSet('users', code, user); // پس منظر میں محفوظ ہوتا ہے، لاگ ان کی رفتار متاثر نہیں ہوتی
@@ -1261,7 +1289,7 @@ let _profileLoadToken = 0;
 async function loadProfileIntoForm(){
   const myToken = ++_profileLoadToken;
   let profile={};
-  const [p, userDoc] = await Promise.all([ fsGet('profiles', activeCode()), fsGet('users', activeCode()) ]);
+  const [p, userDoc] = await Promise.all([ fsGetCached('profiles', activeCode()), fsGetCached('users', activeCode()) ]);
   if(myToken !== _profileLoadToken) return; // ek naya call shuru ho chuka hai — ye purana result chhor dein
   if(p) profile=p;
   const isAdmin = currentUser.role==='admin';
@@ -1771,7 +1799,7 @@ async function loadSlabsIntoForm(){
     currentSlabs = globalCfg.slabs||[];
     document.getElementById('pDefaultRate').value = globalCfg.defaultRate||0;
   } else {
-    const data = (await fsGet('slabs', activeCode())) || {slabs:[], defaultRate:0};
+    const data = (await fsGetCached('slabs', activeCode())) || {slabs:[], defaultRate:0};
     currentSlabs=data.slabs||[];
     document.getElementById('pDefaultRate').value=data.defaultRate||0;
   }
@@ -4093,9 +4121,11 @@ async function tryRestoreSession(){
   let startedAt = 0;
   try{ startedAt = parseInt(localStorage.getItem(SESSION_START_KEY))||0; }catch(e){}
   if(!startedAt || (Date.now()-startedAt) > SESSION_MAX_AGE_MS){ clearSession(); return false; }
-  const fresh = await fsGet('users', saved.code);
+  const boot = await bootstrapFor(saved.code);
+  const fresh = boot ? boot.user : await fsGet('users', saved.code);
   if(!fresh || fresh.status==='closed'){ clearSession(); return false; }
   if(!fresh.role) fresh.role='box';
+  if(boot) primeCachesFromBootstrap(saved.code, boot);
   currentUser=fresh; saveSession(fresh);
   await enterApp(loadLastTab() || 'dashboard');
   return true;
@@ -4143,6 +4173,35 @@ function checkSessionExpiry(){
 }
 document.addEventListener('visibilitychange', ()=>{ if(!document.hidden) checkSessionExpiry(); });
 setInterval(checkSessionExpiry, 5*60*1000); // also re-check every 5 minutes while the app stays open
+
+/* ---------------- رفتار کی رپورٹ: صرف تب نظر آتی ہے جب لنک کے آخر میں ?speed=1 لگایا جائے ---------------- */
+if(new URLSearchParams(location.search).get('speed')==='1'){
+  const btn=document.createElement('div');
+  btn.id='speedBtn'; btn.textContent='⏱';
+  btn.style.cssText='position:fixed;left:10px;bottom:10px;z-index:99999;background:#1F4B3F;color:#fff;border-radius:50%;width:42px;height:42px;display:flex;align-items:center;justify-content:center;font-size:20px;cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,.3);';
+  const panel=document.createElement('div');
+  panel.id='speedPanel';
+  panel.style.cssText='position:fixed;left:10px;bottom:60px;z-index:99999;background:#fff;border:2px solid #1F4B3F;border-radius:10px;max-height:60vh;max-width:96vw;overflow:auto;padding:8px;font:11px Tahoma,Arial,sans-serif;direction:ltr;text-align:left;display:none;';
+  const render=()=>{
+    const rows=_speedLog.slice().reverse();
+    const withServer=rows.filter(r=>r.server!==null);
+    const avg=(a)=>a.length?Math.round(a.reduce((s,x)=>s+x,0)/a.length):0;
+    panel.innerHTML='';
+    const head=document.createElement('div');
+    head.style.cssText='margin-bottom:6px;font-weight:bold;';
+    head.textContent='Calls: '+rows.length+' | avg total '+avg(rows.map(r=>r.total))+' ms | avg server '+avg(withServer.map(r=>r.server))+' ms | avg baaqi (network+start) '+avg(withServer.map(r=>r.total-r.server))+' ms';
+    panel.appendChild(head);
+    const clear=document.createElement('button'); clear.textContent='Clear'; clear.style.cssText='font-size:11px;margin-bottom:6px;padding:2px 8px;'; clear.onclick=()=>{ _speedLog.length=0; render(); };
+    panel.appendChild(clear);
+    const tbl=document.createElement('table'); tbl.style.cssText='border-collapse:collapse;';
+    const addRow=(cells,bold)=>{ const tr=document.createElement('tr'); cells.forEach(c=>{ const td=document.createElement('td'); td.textContent=c; td.style.cssText='border:1px solid #ccc;padding:2px 5px;'+(bold?'font-weight:bold;background:#eee;':''); tr.appendChild(td); }); tbl.appendChild(tr); };
+    addRow(['Waqt','Call','Kul ms','Server ms','Baaqi ms'],true);
+    rows.forEach(r=>addRow([r.at, r.what, r.total, r.server===null?'-':r.server, r.server===null?'-':(r.total-r.server)]));
+    panel.appendChild(tbl);
+  };
+  btn.onclick=()=>{ if(panel.style.display==='none'){ render(); panel.style.display='block'; } else panel.style.display='none'; };
+  document.body.appendChild(panel); document.body.appendChild(btn);
+}
 
 /* expose functions referenced by inline onclick/onchange/oninput attributes */
 Object.assign(window, {
