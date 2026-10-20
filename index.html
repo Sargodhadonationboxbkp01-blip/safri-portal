@@ -743,7 +743,7 @@ const _speedLog=[]; // har call ka waqt (sirf ?speed=1 par panel mein dikhta hai
 function _logSpeed(action, params, totalMs, serverMs){
   const p=params||{};
   _speedLog.push({at:new Date().toLocaleTimeString('en-GB'), what:action+' '+(p.col||'')+((p.id||p.code)?(' '+(p.id||p.code)):''), total:Math.round(totalMs), server:(typeof serverMs==='number'?serverMs:null)});
-  if(_speedLog.length>60) _speedLog.shift();
+  if(_speedLog.length>300) _speedLog.shift();
 }
 async function _apiCall(action, params, bodyObj, _isRetry){
   const _t0 = performance.now();
@@ -827,6 +827,22 @@ async function fsSet(col,id,data){
 async function fsDelete(col,id){
   try{ await _apiCall('delete', {col, id}, {}); _fsInvalidate(col); return true; }
   catch(e){ console.error(e); return false; }
+}
+// Kai zimmedaron ki ek mahine ki entries chand calls mein (35-35 ke tukron mein, ek saath). Naya server na ho ya masla ho to null.
+async function fsEntriesMonthMulti(codes, year, month){
+  const CHUNK=35, chunks=[];
+  for(let i=0;i<codes.length;i+=CHUNK) chunks.push(codes.slice(i,i+CHUNK));
+  try{
+    const parts = await Promise.all(chunks.map(ch=>_apiCall('entries-multi', {year, month}, {codes:ch})));
+    const out = {};
+    parts.forEach(r=>Object.assign(out, (r && r.data) || {}));
+    return out;
+  }catch(e){ console.error('entries-multi nakam (purana tareeqa istemal hoga):', e); return null; }
+}
+// Poori collection (jaise profiles/slabs) {id: record} ki surat mein EK call mein
+async function fsGetRawCollection(col){
+  try{ const r = await _apiCall('get-raw', {col}); return (r && r.data) || {}; }
+  catch(e){ console.error(e); return null; }
 }
 // Admin: ek zimmedar ke ek mahine ki meter photos server par EK HI BAAR mein hatana (baqi entry mehfooz)
 async function fsDeleteMonthPhotos(code, year, month){
@@ -3025,12 +3041,24 @@ async function migrateOldSubmittedStages(){
   toast(`مکمل ✓ — ${checkedCount} ریکارڈز چیک کیے گئے، ${fixedCount} کو نئے سسٹم کے مطابق درست کر دیا گیا`);
   updateSubmittedBadgeCount();
 }
-async function computeUserMonthSummary(code, year, month, globalCfg, profileCache){
-  const profile = (profileCache && profileCache[code]) || (await fsGet('profiles', code)) || {};
-  const map = await getMonthEntryMapFor(code, year, month);
+// profileCache/slabsCache: {code: record} (poori collection ek hi call mein), prefetchedEntries: is zimmedar ke us mahine ki entries
+// (ek hi call mein sab ke liye). Ye teeno na milen to purani tarah har zimmedar ke liye alag alag server se mangta hai.
+async function computeUserMonthSummary(code, year, month, globalCfg, profileCache, prefetchedEntries, slabsCache){
+  const profile = (profileCache && profileCache[code]) || (profileCache ? {} : ((await fsGet('profiles', code)) || {}));
+  let map;
+  if(prefetchedEntries){
+    map = {};
+    prefetchedEntries.forEach(e=>{
+      if(!e || !e.date || typeof e.date!=='string' || !/^\d{4}-\d{2}-\d{2}$/.test(e.date)) return;
+      const d = parseLocalDate(e.date);
+      if(d.getMonth()===month && d.getFullYear()===year) map[e.date]=e;
+    });
+  } else {
+    map = await getMonthEntryMapFor(code, year, month);
+  }
   let slabs, defaultRate;
   if(globalCfg.enabled){ slabs=globalCfg.slabs||[]; defaultRate=globalCfg.defaultRate||0; }
-  else { const s = (await fsGet('slabs', code)) || {slabs:[],defaultRate:0}; slabs=s.slabs||[]; defaultRate=s.defaultRate||0; }
+  else { const s = (slabsCache ? slabsCache[code] : await fsGet('slabs', code)) || {slabs:[],defaultRate:0}; slabs=s.slabs||[]; defaultRate=s.defaultRate||0; }
   let totalFare=0, totalPetrol=0, totalMaintenance=0, filledCount=0, lastEntryDate=null;
   Object.keys(map).forEach(dateStr=>{
     const e = map[dateStr];
@@ -3153,11 +3181,19 @@ async function renderDistrictReport(){
   }
 
   // ہر یوزر کے لیے ایک ہی بار ڈیٹا اکٹھا کرتے ہیں (تاکہ Overall اور ضلع وار دونوں کارڈز کے لیے دوبارہ سرور کو کال نہ کرنی پڑے)
+  // FIX (رفتار): پہلے ہر ذمہ دار کے لیے الگ الگ 2 کالز جاتی تھیں (129 ذمہ داران = 258 کالز ایک ساتھ)۔ اب پروفائلز/ریٹس
+  // پوری ایک کال میں، اور سب کی اس مہینے کی انٹریز چند کالز میں آتی ہیں۔ نیا سرور نہ ہو تو پرانا طریقہ خود چلتا ہے۔
+  const reportCodes = scopeUsers.map(u=>u.code);
+  const [profilesMap, slabsMap, entriesBy] = await Promise.all([
+    fsGetRawCollection('profiles'),
+    globalCfg.enabled ? Promise.resolve(null) : fsGetRawCollection('slabs'),
+    fsEntriesMonthMulti(reportCodes, year, month)
+  ]);
   const perUserResults = {};
   await Promise.all(scopeUsers.map(async u=>{
     const appr = apprMap[u.code];
     const isSubmitted = !!(appr && (appr.status==='submitted' || appr.status==='approved'));
-    const summary = await computeUserMonthSummary(u.code, year, month, globalCfg);
+    const summary = await computeUserMonthSummary(u.code, year, month, globalCfg, profilesMap||undefined, entriesBy ? entriesBy[u.code] : undefined, slabsMap||undefined);
     perUserResults[u.code] = {
       code:u.code, name:u.name, isSubmitted, totalBill:summary.totalBill, hasEntry:summary.hasEntry,
       entryCount:summary.entryCount, lastEntryDate:summary.lastEntryDate,
