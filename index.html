@@ -828,6 +828,187 @@ async function fsDelete(col,id){
   try{ await _apiCall('delete', {col, id}, {}); _fsInvalidate(col); return true; }
   catch(e){ console.error(e); return false; }
 }
+/* ===== FORAN SAVE START =====
+   Save dabate hi screen foran band ho jati hai, lekin entry pehle is device ki localStorage mein MEHFOOZ hoti hai
+   (server ka jawab ana baaqi), phir ek qatar (queue) mein ek ke baad ek server par jati hai. Server "ok" kahe
+   tab hi entry qatar se hatti hai. Nakam ho to khud dobara koshish karti rehti hai (page band ho kar dobara khule
+   tab bhi). Qatar khali na ho to: upar paTTi nazar aati hai, page band karne par warning, mahina jama nahi hota. */
+const PENDING_KEY = 'safri_pending_saves_v1';
+const PENDING_LOCK_KEY = 'safri_pending_lock_v1';
+const _pend = { draining:false, timer:null, hadItems:false, tabId:Math.random().toString(36).slice(2), lastErr:'' };
+function _pendRead(){
+  try{ const raw=localStorage.getItem(PENDING_KEY); return raw ? (JSON.parse(raw)||{}) : {}; }
+  catch(e){ console.error('pending parh nahi saka', e); return {}; }
+}
+function _pendWrite(obj){
+  try{
+    if(Object.keys(obj).length) localStorage.setItem(PENDING_KEY, JSON.stringify(obj)); else localStorage.removeItem(PENDING_KEY);
+    return true;
+  }catch(e){ console.error('pending likh nahi saka', e); return false; }
+}
+function _pendClaim(){ // ek hi waqt mein sirf ek tab qatar chalaye (warna ek hi shard par do likhai takra sakti hain)
+  try{
+    const now=Date.now();
+    const l=JSON.parse(localStorage.getItem(PENDING_LOCK_KEY)||'null');
+    if(l && l.tab!==_pend.tabId && (now-l.ts)<60000) return false;
+    localStorage.setItem(PENDING_LOCK_KEY, JSON.stringify({tab:_pend.tabId, ts:now}));
+    return true;
+  }catch(e){ return true; }
+}
+function _pendRelease(){
+  try{ const l=JSON.parse(localStorage.getItem(PENDING_LOCK_KEY)||'null'); if(l && l.tab===_pend.tabId) localStorage.removeItem(PENDING_LOCK_KEY); }catch(e){}
+}
+function pendingCount(code){
+  const ids=Object.keys(_pendRead());
+  return code ? ids.filter(id=>id.indexOf(code+'_')===0).length : ids.length;
+}
+// true wapas aaye to entry device par mehfooz ho gayi; false ho to localStorage kaam nahi kar rahi (tab purana tareeqa)
+function pendingEnqueue(id, entry){
+  const all=_pendRead();
+  const old=all[id];
+  const e=Object.assign({}, entry);
+  if(old && old.entry){ // pichli (abhi na gayi) photo nayi save mein na ho to saath rakhein
+    ['meterStartPhoto','meterEndPhoto'].forEach(k=>{ if(!(k in e) && (k in old.entry)) e[k]=old.entry[k]; });
+  }
+  all[id]={ entry:e, v:((old&&old.v)||0)+1, queuedAt:(old&&old.queuedAt)||Date.now(), tries:0, nextTry:0 };
+  return _pendWrite(all);
+}
+function _pendSlim(entry){
+  const o=Object.assign({}, entry);
+  if('meterStartPhoto' in o){ o.hasMeterStartPhoto=!!o.meterStartPhoto; delete o.meterStartPhoto; }
+  if('meterEndPhoto' in o){ o.hasMeterEndPhoto=!!o.meterEndPhoto; delete o.meterEndPhoto; }
+  return o;
+}
+// Dikhane ke liye: server ki list ke upar wo entries jo abhi server tak nahi pahunchi
+function overlayPendingList(code, list){
+  const all=_pendRead();
+  const ids=Object.keys(all).filter(id=>id.indexOf(code+'_')===0);
+  if(!ids.length) return list;
+  const out=(list||[]).slice();
+  ids.forEach(id=>{
+    const date=id.substring(id.indexOf('_')+1);
+    const slim=_pendSlim(all[id].entry);
+    const i=out.findIndex(x=>x && x.date===date);
+    if(i>=0) out[i]=Object.assign({}, out[i], slim); else out.push(slim);
+  });
+  return out;
+}
+function _pendSchedule(ms){
+  clearTimeout(_pend.timer);
+  _pend.timer=setTimeout(()=>{ pendingDrain(false); }, Math.max(1000, ms));
+}
+async function pendingDrain(force){
+  if(_pend.draining) return;
+  if(!pendingCount()) return;
+  if(!_pendClaim()){ _pendSchedule(15000); return; }
+  _pend.draining=true;
+  const tried={}; // is run mein har entry sirf ek dafa (warna nakam entry par bina ruke dohrati rehti)
+  try{
+    while(true){
+      const all=_pendRead();
+      const now=Date.now();
+      const ready=Object.keys(all).filter(id=>!tried[id] && (force || !all[id].nextTry || all[id].nextTry<=now))
+        .sort((a,b)=>all[a].queuedAt-all[b].queuedAt);
+      if(!ready.length) break;
+      const id=ready[0], item=all[id], sentV=item.v;
+      tried[id]=true;
+      _pendClaim();
+      try{
+        await _apiCall('set', {col:'entries', id}, item.entry);
+        _fsInvalidate('entries');
+        const cur=_pendRead();
+        if(cur[id] && cur[id].v===sentV) delete cur[id]; // server ne ok kaha — ab hi qatar se hatti hai
+        _pendWrite(cur);
+        _pend.lastErr='';
+      }catch(e){
+        console.error('pending save nakam', id, e);
+        _pend.lastErr=String((e && e.message) || e);
+        const cur=_pendRead();
+        if(cur[id]){
+          cur[id].tries=(cur[id].tries||0)+1;
+          cur[id].nextTry=Date.now()+Math.min(60000, 5000*Math.pow(2, cur[id].tries-1));
+          _pendWrite(cur);
+        }
+      }
+      updatePendingUi();
+    }
+  } finally {
+    _pend.draining=false;
+    _pendRelease();
+    const left=_pendRead();
+    const ids=Object.keys(left);
+    if(ids.length){
+      const next=Math.min.apply(null, ids.map(i=>left[i].nextTry||0));
+      _pendSchedule(Math.max(1000, next-Date.now()));
+    }
+    updatePendingUi();
+  }
+}
+// Jama karwane/ریمارک/صفائی se pehle: is zimmedar ki saari pending entries server par pahunchne tak intezar
+async function flushPendingSaves(code, maxMs){
+  maxMs=maxMs||90000;
+  if(!pendingCount(code)) return true;
+  toast('پہلے آخری سفر محفوظ ہو رہا ہے، چند سیکنڈ انتظار کریں...');
+  const t0=Date.now();
+  while(pendingCount(code) && Date.now()-t0<maxMs){
+    pendingDrain(true);
+    await new Promise(r=>setTimeout(r,800));
+  }
+  return pendingCount(code)===0;
+}
+function updatePendingUi(){
+  const all=_pendRead();
+  const ids=Object.keys(all);
+  // din ki list mein har din ka nishan
+  try{
+    document.querySelectorAll('.pend-slot').forEach(el=>{ el.innerHTML=''; });
+    ids.forEach(id=>{
+      const el=document.getElementById('pend-'+id.substring(id.indexOf('_')+1));
+      if(!el) return;
+      const bad=(all[id].tries||0)>0;
+      el.innerHTML = bad
+        ? '<div class="edit-badge" style="color:#8B2E2E;">⚠️ محفوظ نہیں ہوا — دوبارہ کوشش ہو رہی ہے</div>'
+        : '<div class="edit-badge" style="color:#8a5a00;">⏳ سرور پر محفوظ ہو رہا ہے…</div>';
+    });
+  }catch(e){}
+  // نیچے کی پٹی
+  let bar=document.getElementById('pendBar');
+  if(!ids.length){
+    if(_pend.hadItems){
+      _pend.hadItems=false;
+      if(!bar){ bar=document.createElement('div'); bar.id='pendBar'; document.body.appendChild(bar); }
+      bar.style.cssText='position:fixed;left:8px;right:8px;bottom:8px;z-index:99999;padding:10px 12px;border-radius:10px;font-size:13px;text-align:center;background:#e3f6e6;color:#1b5e20;border:1px solid #1b5e20;';
+      bar.dataset.done='1';
+      bar.textContent='✓ سب سفر سرور پر محفوظ ہو گئے';
+      setTimeout(()=>{ const b=document.getElementById('pendBar'); if(b && !pendingCount()) b.remove(); }, 2500);
+    } else if(bar && !bar.dataset.done){ bar.remove(); }
+    return;
+  }
+  _pend.hadItems=true;
+  const failing=ids.some(i=>(all[i].tries||0)>0);
+  if(!bar){ bar=document.createElement('div'); bar.id='pendBar'; document.body.appendChild(bar); }
+  bar.dataset.done='';
+  bar.style.cssText='position:fixed;left:8px;right:8px;bottom:8px;z-index:99999;padding:10px 12px;border-radius:10px;font-size:13px;text-align:center;'+
+    (failing ? 'background:#fde3e3;color:#8B2E2E;border:1px solid #8B2E2E;' : 'background:#fff3cd;color:#8a5a00;border:1px solid #8a5a00;');
+  bar.innerHTML = (failing
+    ? '⚠️ '+ids.length+' سفر ابھی تک سرور پر محفوظ نہیں ہوا (انٹرنیٹ/سرور) — خود دوبارہ کوشش ہو رہی ہے۔ صفحہ بند نہ کریں۔ <button id="pendRetryBtn" style="margin-top:6px;padding:4px 10px;">ابھی دوبارہ کوشش</button>'
+    : '⏳ '+ids.length+' سفر سرور پر محفوظ ہو رہا ہے — صفحہ بند نہ کریں');
+  const btn=document.getElementById('pendRetryBtn');
+  if(btn) btn.onclick=()=>pendingDrain(true);
+}
+function initPendingSaves(){
+  window.addEventListener('beforeunload', e=>{
+    if(pendingCount()){ e.preventDefault(); e.returnValue=''; return ''; }
+  });
+  window.addEventListener('online', ()=>pendingDrain(true));
+  document.addEventListener('visibilitychange', ()=>{ if(document.visibilityState==='visible' && pendingCount()) pendingDrain(true); });
+  setInterval(()=>{ if(pendingCount() && !_pend.draining) pendingDrain(false); }, 30000);
+  updatePendingUi();
+  if(pendingCount()) pendingDrain(true); // pichli dafa ki adhoori entries
+}
+initPendingSaves();
+/* ===== FORAN SAVE END ===== */
+
 // Kai zimmedaron ki ek mahine ki entries chand calls mein (35-35 ke tukron mein, ek saath). Naya server na ho ya masla ho to null.
 async function fsEntriesMonthMulti(codes, year, month){
   const CHUNK=35, chunks=[];
@@ -1227,6 +1408,10 @@ async function doLogin(){
   await enterApp('dashboard');
 }
 async function doLogout(){
+  if(pendingCount()){
+    const flushed = await flushPendingSaves(null, 30000);
+    if(!flushed && !confirm('کچھ سفر ابھی سرور پر محفوظ نہیں ہوئے۔ لاگ آؤٹ کے بعد بھی صفحہ کھلا رہنے دیں تو خود محفوظ ہو جائیں گے، ورنہ دوبارہ کھولنے پر ہوں گے۔ پھر بھی لاگ آؤٹ کریں؟')) return;
+  }
   currentUser=null; viewingCode=null; viewingUserObj=null;
   clearSession();
   document.getElementById('appScreen').classList.add('hidden');
@@ -2568,7 +2753,7 @@ async function downloadDistrictExcelSummary(){
 function entryDocId(dateStr){ return activeCode()+'_'+dateStr; }
 
 async function getMonthEntryMapFor(code, year, month){
-  const list = await fsListWhere('entries', 'code', code);
+  const list = overlayPendingList(code, await fsListWhere('entries', 'code', code)); // jo entries abhi server tak nahi pahunchi wo bhi shamil
   const map={};
   list.forEach(e=>{
     if(!e || !e.date || typeof e.date!=='string' || !/^\d{4}-\d{2}-\d{2}$/.test(e.date)){
@@ -2615,7 +2800,7 @@ async function renderDaysList(){
     const remarkBadge = (e && e.remarks && e.remarks.length) ? `<div class="edit-badge" style="color:#254A40;">💬 ${e.remarks.length} ریمارک/جواب</div>` : '';
     rowsHtml.push(`
       <div class="day-row ${filled?'filled':'empty-day'} ${e&&e.editedBy?'was-edited':''}" onclick="toggleDayEditor('${dateStr}')">
-        <div class="dinfo"><b>${dateStr} — ${dayName}</b><div class="dsum">${escapeHtml(detailLine)}</div>${editBadge}${remarkBadge}</div>
+        <div class="dinfo"><b>${dateStr} — ${dayName}</b><div class="dsum">${escapeHtml(detailLine)}</div>${editBadge}${remarkBadge}<span class="pend-slot" id="pend-${dateStr}"></span></div>
         <div class="darrow">›</div>
       </div>
       <div class="day-editor-slot" id="slot-${dateStr}"></div>`);
@@ -2630,6 +2815,7 @@ async function renderDaysList(){
   const total=totalFare+totalPetrol+totalMaintenance-monthlyDeduction-(profile.preAudit||0);
   document.getElementById('sumTotal').textContent=fmtNum(total);
   renderApprovalBadge();
+  updatePendingUi();
 }
 
 /* ---------------- submit + approval workflow ----------------
@@ -2857,6 +3043,7 @@ async function adminClearMonthEntries(){
   if(!sure1) return;
   const sure2 = confirm('یہ حتمی تصدیق ہے — یہ عمل واپس نہیں کیا جا سکتا۔ جاری رکھیں؟');
   if(!sure2) return;
+  if(!(await flushPendingSaves(code))){ toast('اس زمہ دار کی کچھ انٹریز ابھی سرور پر محفوظ ہو رہی ہیں — صفائی نہیں ہوئی، بعد میں کوشش کریں'); return; }
   toast('صاف کیا جا رہا ہے...');
   await fsDeleteMonthPhotos(code, year, month);
   const monthMap = await getMonthEntryMapFor(code, year, month);
@@ -2872,6 +3059,7 @@ async function adminClearMonthEntries(){
   renderApprovalBadge();
 }
 async function submitMonth(signatureDataUrl){
+  if(!(await flushPendingSaves(activeCode()))){ toast('آخری سفر ابھی سرور پر محفوظ نہیں ہوا — مہینہ جمع نہیں کروایا گیا، انٹرنیٹ چیک کر کے دوبارہ کوشش کریں'); return; }
   const profile=getProfileFromForm();
   const id=approvalDocId(activeCode(), profile.year, profile.month);
   const existing = await fsGet('approvals', id, {slim:true});
@@ -2882,7 +3070,8 @@ async function submitMonth(signatureDataUrl){
   const ok = await fsSet('approvals', id, {code:activeCode(), year:profile.year, month:profile.month, status:'submitted', stage:checkerStage, history, by:entry.by, at:entry.at, note:''});
   if(ok){ toast('یہ مہینہ جمع کروا دیا گیا ✓ — اب '+stageLabel(checkerStage)+' کے پاس بھیج دیا گیا ہے'); renderApprovalBadge(); renderDaysList(); } else toast('محفوظ کرنے میں خرابی');
 }
-function submitWithSignature(){
+async function submitWithSignature(){
+  if(!(await flushPendingSaves(activeCode()))){ toast('آخری سفر ابھی سرور پر محفوظ نہیں ہوا — انٹرنیٹ چیک کر کے دوبارہ کوشش کریں'); return; }
   const profile=getProfileFromForm();
   const sure = confirm('کیا آپ '+urduMonths[profile.month]+' '+profile.year+' کا سفری ریکارڈ جمع کروانا چاہتے ہیں؟ جمع کروانے کے بعد آپ خود اس میں ترمیم نہیں کر سکیں گے۔');
   if(!sure) return;
@@ -3272,7 +3461,9 @@ async function openDayEditor(dateStr){
   let e={date:dateStr, travel:'', travelFrom:'', travelTo:'', activity:'', meterStart:'', meterEnd:'', km:'', fare:''};
   const [res, locked] = await Promise.all([ fsGetEntryFull(entryDocId(dateStr)), isMonthLockedForOwner() ]);
   openDayLocked=locked; openDayLockedAt=Date.now();
-  if(res) e=res;
+  const pendItem = _pendRead()[entryDocId(dateStr)];
+  if(pendItem){ e = Object.assign({}, res||e, pendItem.entry); } // abhi server tak na pahunchi hui entry ko upar rakhein
+  else if(res) e=res;
   currentDayPhotos={start:e.meterStartPhoto||null, end:e.meterEndPhoto||null};
   originalDayPhotos={start:currentDayPhotos.start, end:currentDayPhotos.end};
   const d=parseLocalDate(dateStr); const dayName=urduDays[d.getDay()];
@@ -3448,8 +3639,17 @@ async function saveDayEntry(){
     entry.editedBy={name:currentUser.name, role:currentUser.role||'box'};
     entry.editedAt=new Date().toISOString();
   }
-  const ok = await fsSet('entries', entryDocId(openDayDate), entry);
-  if(ok){ toast('سفر محفوظ ہو گیا ✓'); closeDayEditor(); renderDaysList(); /* intezar nahi: list peeche se taaza ho jati hai */ } else toast('محفوظ کرنے میں خرابی');
+  const entryId = entryDocId(openDayDate);
+  // FORAN SAVE: pehle entry is device par mehfooz hoti hai, phir screen band; server par bhejna peeche se, ok milne tak qatar mein
+  if(pendingEnqueue(entryId, entry)){
+    toast('سفر قبول ہو گیا ✓ — سرور پر محفوظ ہو رہا ہے، صفحہ بند نہ کریں');
+    closeDayEditor(); renderDaysList(); updatePendingUi(); pendingDrain(false);
+    return;
+  }
+  // device par mehfooz na ho saki (storage band/bhari): purana tareeqa — jab tak server ok na kahe screen band nahi hoti
+  toast('محفوظ ہو رہا ہے، انتظار کریں...');
+  const ok = await fsSet('entries', entryId, entry);
+  if(ok){ toast('سفر محفوظ ہو گیا ✓'); closeDayEditor(); renderDaysList(); } else toast('محفوظ کرنے میں خرابی — اندراج فارم میں موجود ہے، دوبارہ محفوظ کریں');
 }
 
 async function addRemark(){
@@ -3457,6 +3657,7 @@ async function addRemark(){
   const textEl = document.getElementById('eRemarkText');
   const text = textEl.value.trim();
   if(!text){ toast('پہلے کچھ لکھیں'); return; }
+  if(!(await flushPendingSaves(activeCode()))){ toast('پہلے والا سفر ابھی محفوظ نہیں ہوا، دوبارہ کوشش کریں'); return; }
   const id = entryDocId(openDayDate);
   let entry = await fsGet('entries', id);
   if(!entry){
