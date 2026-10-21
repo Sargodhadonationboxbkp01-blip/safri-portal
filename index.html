@@ -783,8 +783,8 @@ async function _apiCall(action, params, bodyObj, _isRetry){
   }
   return json;
 }
-async function fsGet(col,id){
-  try{ const params = {col, id}; if(col==='entries') params.slim = '1'; /* photos ke baghair halka record */ const r = await _apiCall('get', params); return r.data; }
+async function fsGet(col,id,opts){
+  try{ const params = {col, id}; if(col==='entries' || (opts && opts.slim)) params.slim = '1'; /* photos ke baghair halka record */ const r = await _apiCall('get', params); return r.data; }
   catch(e){ console.error(e); toast('سرور سے ڈیٹا لینے میں خرابی — انٹرنیٹ/سرور چیک کریں'); return null; }
 }
 // SIRF dikhane ke raaston ke liye: wahi record kuch dair (config 60s, approvals 30s) mein baar baar mangne ya
@@ -1216,8 +1216,12 @@ async function doLogin(){
   btn.disabled=false;
   if(boot) primeCachesFromBootstrap(code, boot); // dashboard ka data pehle se mil chuka hai — dobara server ko nahi jana
   user.lastLogin = new Date().toISOString();
-  if(!looksHashed(user.pin)) user.pin = await sha256Hex(pin); // purani plaintext PIN ko khamoshi se hash mein badal dein
-  fsSet('users', code, user); // پس منظر میں محفوظ ہوتا ہے، لاگ ان کی رفتار متاثر نہیں ہوتی
+  if(!looksHashed(user.pin)){
+    user.pin = await sha256Hex(pin); // purani plaintext PIN ko khamoshi se hash mein badal dein
+    fsSet('users', code, user); // sirf isi surat mein poori user record likhi jati hai
+  } else {
+    _apiCall('touch-login', {col:'users', id:code}).catch(e=>console.error('touch-login nakam:', e)); // sirf lastLogin, halka (background)
+  }
   currentUser=user; saveSession(user); saveLastTab('dashboard');
   try{ localStorage.setItem(SESSION_START_KEY, String(Date.now())); }catch(e){}
   await enterApp('dashboard');
@@ -2402,7 +2406,7 @@ async function markSentToBank(checkboxEl, code, year, month){
   const sure = confirm('کیا آپ اس سفری ریکارڈ کی ادائیگی بینک کو بھیج چکے ہیں؟ تصدیق کرنے پر متعلقہ ذمہ دار کو یہ حالت نظر آئے گی۔');
   if(!sure){ checkboxEl.checked=false; return; }
   const id = approvalDocId(code, year, month);
-  const appr = await fsGet('approvals', id);
+  const appr = await fsGet('approvals', id, {slim:true});
   if(!appr){ toast('ریکارڈ نہیں ملا'); checkboxEl.checked=false; return; }
   appr.sentToBank = true;
   appr.sentToBankBy = currentUser.name;
@@ -2870,7 +2874,7 @@ async function adminClearMonthEntries(){
 async function submitMonth(signatureDataUrl){
   const profile=getProfileFromForm();
   const id=approvalDocId(activeCode(), profile.year, profile.month);
-  const existing = await fsGet('approvals', id);
+  const existing = await fsGet('approvals', id, {slim:true});
   const history = (existing && existing.history) || [];
   const entry = {action:'submitted', by:{name:currentUser.name, role:currentUser.role||'box'}, at:new Date().toISOString(), note:'', signature:signatureDataUrl||null};
   history.push(entry);
@@ -2886,7 +2890,7 @@ function submitWithSignature(){
 }
 async function approveStage(code, year, month, signatureDataUrl){
   const id=approvalDocId(code, year, month);
-  const appr = await fsGet('approvals', id);
+  const appr = await fsGet('approvals', id, {slim:true});
   if(!appr){ toast('کوئی جمع شدہ ریکارڈ نہیں ملا'); return false; }
   const stage = appr.stage || 'supervisor';
   const myRole = currentUser.role||'box';
@@ -2937,7 +2941,7 @@ async function sendToFinanceFromPreviewNoSignature(code, year, month){
 async function sendBackToOwner(code, year, month){
   const note = prompt('نظرثانی کی وجہ لکھیں (اختیاری):','') || '';
   const id=approvalDocId(code, year, month);
-  const appr = await fsGet('approvals', id);
+  const appr = await fsGet('approvals', id, {slim:true});
   const history = (appr && appr.history) || [];
   // clear ALL earlier signatures (submission + any approvals along the way) — everyone must sign fresh after revision
   history.forEach(h=>{ if(h.action==='submitted' || h.action==='approved') h.signature=null; });
@@ -3618,7 +3622,7 @@ async function showLedgerPreviewModal(overrideCode, overrideYear, overrideMonth)
     const canvas = await drawLedgerCanvas(overrideCode, overrideYear, overrideMonth);
     const dataUrl = canvas.toDataURL('image/jpeg', 0.9);
 
-    const appr = await fsGet('approvals', approvalDocId(code, year, month));
+    const appr = await fsGet('approvals', approvalDocId(code, year, month), {slim:true});
     const isOwn = code===currentUser.code;
     const myRole = currentUser.role||'box';
     let actionHtml='';
