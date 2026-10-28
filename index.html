@@ -245,6 +245,8 @@
           <div class="field"><label>مہینہ</label><select id="distReportMonth"></select></div>
         </div>
         <div class="field hidden" id="distReportDistrictWrap"><label>ضلع منتخب کریں (اختیاری — صرف ایک ضلع دیکھنے کے لیے)</label><select id="distReportDistrict" onchange="renderDistrictReport()"><option value="">-- تمام اضلاع (Overall + ہر ضلع) --</option></select></div>
+        <div class="field hidden" id="distReportGroupWrap"><label>رپورٹ کس کے حساب سے دیکھیں</label><select id="distReportGroupBy" onchange="onReportGroupChange()"><option value="district">ضلع وار</option><option value="supervisor">سپروائزر وار</option></select></div>
+        <div class="field hidden" id="distReportSupWrap"><label>سپروائزر منتخب کریں (اختیاری — صرف ایک سپروائزر دیکھنے کے لیے)</label><select id="distReportSupervisor" onchange="renderDistrictReport()"><option value="">-- تمام سپروائزرز --</option></select></div>
         <div class="field"><label>رپورٹ کی قسم منتخب کریں</label>
           <select id="distReportType" onchange="renderDistrictReport()">
             <option value="all">تمام تفصیلات (سب اکٹھی)</option>
@@ -2422,6 +2424,12 @@ async function populateAdminDistrictFilter(selectId, wrapId){
 // "رپورٹس" ٹیب کے لیے — یہاں ہر اُس role کے لیے فلٹر دکھایا جاتا ہے جس کے دائرہ اختیار میں ایک سے
 // زیادہ اضلاع ہوں (نہ صرف Admin کے لیے — مثلاً District Office Zimedar کے پاس بھی کئی اضلاع ہو سکتے ہیں)،
 // تاکہ ایک وقت میں صرف ایک ہی مطلوبہ رپورٹ دیکھی جا سکے، سب اکٹھی نہ آئیں۔
+function onReportGroupChange(){
+  const g = (document.getElementById('distReportGroupBy')||{}).value;
+  const w = document.getElementById('distReportSupWrap');
+  if(w) w.classList.toggle('hidden', g!=='supervisor');
+  renderDistrictReport();
+}
 async function populateReportDistrictFilter(){
   const wrap = document.getElementById('distReportDistrictWrap');
   const sel = document.getElementById('distReportDistrict');
@@ -2429,6 +2437,23 @@ async function populateReportDistrictFilter(){
   const scopeUsers = myRole==='admin' ? (await getAllUsers()) : (await getSubordinates());
   const rawDistricts = [...new Set(scopeUsers.flatMap(u=> (Array.isArray(u.districts)&&u.districts.length)?u.districts:(u.district?[u.district]:[]) ))].filter(Boolean).sort();
   wrap.classList.toggle('hidden', rawDistricts.length<=1);
+  // سپروائزر وار رپورٹ کا آپشن (صرف admin / district / district_office کو)
+  const groupWrap = document.getElementById('distReportGroupWrap');
+  const canGroup = ['admin','district','district_office'].includes(myRole);
+  if(groupWrap) groupWrap.classList.toggle('hidden', !canGroup);
+  const supWrap = document.getElementById('distReportSupWrap');
+  const supSel = document.getElementById('distReportSupervisor');
+  if(!canGroup){
+    const gb = document.getElementById('distReportGroupBy'); if(gb) gb.value='district';
+    if(supWrap) supWrap.classList.add('hidden');
+  } else if(supSel){
+    const curSup = supSel.value;
+    const sups = scopeUsers.filter(u=>u.role==='supervisor' && u.status!=='closed').sort((a,b)=>(a.name||'').localeCompare(b.name||''));
+    supSel.innerHTML = '<option value="">-- تمام سپروائزرز --</option>' + sups.map(x=>`<option value="${escapeHtml(x.code)}">${escapeHtml(x.name||'')} (${escapeHtml(x.code)})</option>`).join('');
+    supSel.value = sups.some(x=>x.code===curSup) ? curSup : '';
+    const gbv = (document.getElementById('distReportGroupBy')||{}).value;
+    if(supWrap) supWrap.classList.toggle('hidden', gbv!=='supervisor');
+  }
   if(sel.dataset.populated===('1_'+myRole)) return; // ایک سیشن میں ایک بار کافی ہے (کردار بدلنے پر دوبارہ بھریں)
   sel.innerHTML = '<option value="">-- تمام اضلاع (Overall + ہر ضلع) --</option>' + rawDistricts.map(d=>`<option value="${escapeHtml(d)}">${escapeHtml(d)}</option>`).join('');
   sel.dataset.populated = '1_'+myRole;
@@ -3290,6 +3315,8 @@ async function renderDistrictReport(){
   const fDistrictRaw = fDistrictEl ? fDistrictEl.value : '';
   const fDistrictNorm = fDistrictRaw ? normLoc(fDistrictRaw) : '';
   const reportType = (document.getElementById('distReportType') || {}).value || 'all';
+  const groupBy = (['admin','district','district_office'].includes(myRole) && (document.getElementById('distReportGroupBy')||{}).value==='supervisor') ? 'supervisor' : 'district';
+  const supFilter = groupBy==='supervisor' ? ((document.getElementById('distReportSupervisor')||{}).value || '') : '';
 
   let scopeUsers = isAdmin
     ? (await getAllUsers()).filter(u=>u.status!=='closed')
@@ -3332,7 +3359,7 @@ async function renderDistrictReport(){
     sections.entry = `
         <div style="margin-top:6px;">سفری اندراج کیا: <b style="color:var(--success);">${enteredCount}</b> &nbsp;|&nbsp; بالکل اندراج نہیں کیا: <b style="color:var(--danger);">${notEnteredNames.length}</b></div>
         ${notEnteredNames.length ? `<div class="note" style="margin-top:4px;">اندراج نہیں کیا: ${escapeHtml(notEnteredNames.join('، '))}</div>` : ''}
-        <div style="margin-top:6px;">${isAdmin&&title!=='مجموعی (Overall) — تمام اضلاع'?'اس ضلع':'کل'} ماہانہ خرچہ: <b>${fmtNum(distExpense)}</b></div>`;
+        <div style="margin-top:6px;">${isAdmin&&title.indexOf('مجموعی')!==0?(groupBy==='supervisor'?'اس گروپ کا':'اس ضلع'):'کل'} ماہانہ خرچہ: <b>${fmtNum(distExpense)}</b></div>`;
     sections.detail = `
         <div style="overflow-x:auto;margin-top:8px;">
             <table style="width:100%;border-collapse:collapse;font-size:12.5px;">
@@ -3395,12 +3422,43 @@ async function renderDistrictReport(){
   }));
 
   let html='';
-  if(!fDistrictNorm && districtNames.length>1){
-    html += cardHtml('مجموعی (Overall) — تمام اضلاع', scopeUsers, scopeUsers.map(u=>perUserResults[u.code]));
-  }
-  for(const distName of districtNames){
-    const usersInDist = districtGroups[distName];
-    html += cardHtml(distName, usersInDist, usersInDist.map(u=>perUserResults[u.code]));
+  if(groupBy==='supervisor'){
+    // سپروائزر کے ماتحت = وہ باکس ذمہ دار جو اسے "سپروائزر تفویض" ٹیب میں دیے گئے ہوں (وہی اصول جس پر مہینہ جمع ہو کر چیک کے لیے جاتا ہے)
+    const allU = await getAllUsers();
+    const sups = allU.filter(u=>u.role==='supervisor' && u.status!=='closed').sort((a,b)=>(a.name||'').localeCompare(b.name||''));
+    const supOf = {};
+    sups.forEach(sv=>{ (sv.assignedBoxCodes||[]).forEach(bc=>{ if(!supOf[bc]) supOf[bc]=sv.code; }); });
+    const groups = [];
+    sups.forEach(sv=>{
+      if(supFilter && sv.code!==supFilter) return;
+      const members = scopeUsers.filter(u=>supOf[u.code]===sv.code);
+      if(!members.length) return;
+      const dd = userDistricts(sv);
+      groups.push({title:'سپروائزر: '+(sv.name||'')+' ('+sv.code+')'+(dd.length?' — '+dd.join('، '):''), users:members});
+    });
+    if(!supFilter){
+      const unassigned = scopeUsers.filter(u=>u.role==='box' && !supOf[u.code]);
+      if(unassigned.length) groups.push({title:'بغیر سپروائزر کے باکس ذمہ داران (یہ براہ راست ضلع کے ذمہ دار کو جاتے ہیں)', users:unassigned});
+      const others = scopeUsers.filter(u=>u.role!=='box');
+      if(others.length) groups.push({title:'دیگر عہدے (سپروائزر کے ماتحت نہیں)', users:others});
+    }
+    if(!groups.length){
+      box.innerHTML = '<div class="empty">'+(supFilter ? 'اس سپروائزر کو ابھی کوئی باکس ذمہ دار تفویض نہیں (یا منتخب ضلع میں نہیں)۔' : 'کوئی ذمہ دار موجود نہیں۔')+'</div>';
+      return;
+    }
+    html += '<div class="note" style="margin-bottom:8px;">سپروائزر وار رپورٹ: ہر سپروائزر کے نیچے وہ باکس ذمہ داران جو اسے "سپروائزر تفویض" میں دیے گئے ہیں۔</div>';
+    if(!supFilter && groups.length>1){
+      html += cardHtml('مجموعی (Overall) — تمام سپروائزرز', scopeUsers, scopeUsers.map(u=>perUserResults[u.code]));
+    }
+    groups.forEach(g=>{ html += cardHtml(g.title, g.users, g.users.map(u=>perUserResults[u.code])); });
+  } else {
+    if(!fDistrictNorm && districtNames.length>1){
+      html += cardHtml('مجموعی (Overall) — تمام اضلاع', scopeUsers, scopeUsers.map(u=>perUserResults[u.code]));
+    }
+    for(const distName of districtNames){
+      const usersInDist = districtGroups[distName];
+      html += cardHtml(distName, usersInDist, usersInDist.map(u=>perUserResults[u.code]));
+    }
   }
   box.innerHTML = html || '<div class="empty">کوئی ذمہ دار موجود نہیں۔</div>';
 }
@@ -4459,7 +4517,7 @@ Object.assign(window, {
   openDayEditor, toggleDayEditor, onMeterChange, closeDayEditor, saveDayEntry, addRemark,
   changeOwnPin, resetSubordinatePin, toggleAccountStatus, editOrgName, approveCurrentStage, sendBackCurrentStage, submitMonth, filterSubList,
   generateAndDownloadPdf, shareWhatsApp, renderDaysList, populateLocationDatalists,
-  onAdminPickRoleChange, onAdminPickUserChange, backToOwnFromPicker, toggleSelectAllSub, bulkLockProfiles, confirmMailedToFinance, adminClearMonthEntries, renderDistrictReport, migrateOldSubmittedStages, verifyMemberProfile, adminDeletePhotos, switchDoProfileMode, filterDoProfileList, selectDoProfile, filterAdminSearchList, selectAdminSearchResult, markSentToBank,
+  onAdminPickRoleChange, onAdminPickUserChange, backToOwnFromPicker, toggleSelectAllSub, bulkLockProfiles, confirmMailedToFinance, adminClearMonthEntries, renderDistrictReport, onReportGroupChange, migrateOldSubmittedStages, verifyMemberProfile, adminDeletePhotos, switchDoProfileMode, filterDoProfileList, selectDoProfile, filterAdminSearchList, selectAdminSearchResult, markSentToBank,
   renderSubmittedList, renderVerifiedList,
   initAssignSupTab, onAssignDistrictChange, onAssignSupervisorChange, saveDistrictAssignments, unassignBoxDirect,
   renderDashboard, handleMeterPhotoUpload, toggleDayRemarks, viewMeterPhotoFull
