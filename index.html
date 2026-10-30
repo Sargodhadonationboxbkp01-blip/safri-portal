@@ -246,7 +246,7 @@
         </div>
         <div class="field hidden" id="distReportDistrictWrap"><label>ضلع منتخب کریں (اختیاری — صرف ایک ضلع دیکھنے کے لیے)</label><select id="distReportDistrict" onchange="renderDistrictReport()"><option value="">-- تمام اضلاع (Overall + ہر ضلع) --</option></select></div>
         <div class="field hidden" id="distReportGroupWrap"><label>رپورٹ کس کے حساب سے دیکھیں</label><select id="distReportGroupBy" onchange="onReportGroupChange()"><option value="district">ضلع وار</option><option value="supervisor">سپروائزر وار</option></select></div>
-        <div class="field hidden" id="distReportSupWrap"><label>سپروائزر منتخب کریں (اختیاری — صرف ایک سپروائزر دیکھنے کے لیے)</label><select id="distReportSupervisor" onchange="renderDistrictReport()"><option value="">-- تمام سپروائزرز --</option></select></div>
+        <div class="field hidden" id="distReportSupWrap"><label>سپروائزر / ضلع کا ذمہ دار منتخب کریں (اختیاری — صرف ایک کو دیکھنے کے لیے)</label><select id="distReportSupervisor" onchange="renderDistrictReport()"><option value="">-- سب (تمام سپروائزرز اور ضلعی ذمہ داران) --</option></select></div>
         <div class="field"><label>رپورٹ کی قسم منتخب کریں</label>
           <select id="distReportType" onchange="renderDistrictReport()">
             <option value="all">تمام تفصیلات (سب اکٹھی)</option>
@@ -2448,9 +2448,15 @@ async function populateReportDistrictFilter(){
     if(supWrap) supWrap.classList.add('hidden');
   } else if(supSel){
     const curSup = supSel.value;
-    const sups = scopeUsers.filter(u=>u.role==='supervisor' && u.status!=='closed').sort((a,b)=>(a.name||'').localeCompare(b.name||''));
-    supSel.innerHTML = '<option value="">-- تمام سپروائزرز --</option>' + sups.map(x=>`<option value="${escapeHtml(x.code)}">${escapeHtml(x.name||'')} (${escapeHtml(x.code)})</option>`).join('');
-    supSel.value = sups.some(x=>x.code===curSup) ? curSup : '';
+    const pool = myRole==='district' ? scopeUsers.concat([currentUser]) : scopeUsers;
+    const byName = (a,b)=>(a.name||'').localeCompare(b.name||'');
+    const sups = pool.filter(u=>u.role==='supervisor' && u.status!=='closed').sort(byName);
+    const dzs = pool.filter(u=>u.role==='district' && u.status!=='closed').sort(byName);
+    const optOf = x=>`<option value="${escapeHtml(x.code)}">${escapeHtml(x.name||'')} (${escapeHtml(x.code)})</option>`;
+    supSel.innerHTML = '<option value="">-- سب (تمام سپروائزرز اور ضلعی ذمہ داران) --</option>'
+      + (sups.length ? '<optgroup label="سپروائزرز">'+sups.map(optOf).join('')+'</optgroup>' : '')
+      + (dzs.length ? '<optgroup label="ضلعی ذمہ داران (بغیر سپروائزر والوں کے لیے)">'+dzs.map(optOf).join('')+'</optgroup>' : '');
+    supSel.value = (sups.concat(dzs)).some(x=>x.code===curSup) ? curSup : '';
     const gbv = (document.getElementById('distReportGroupBy')||{}).value;
     if(supWrap) supWrap.classList.toggle('hidden', gbv!=='supervisor');
   }
@@ -3430,23 +3436,37 @@ async function renderDistrictReport(){
     sups.forEach(sv=>{ (sv.assignedBoxCodes||[]).forEach(bc=>{ if(!supOf[bc]) supOf[bc]=sv.code; }); });
     const groups = [];
     sups.forEach(sv=>{
-      if(supFilter && sv.code!==supFilter) return;
       const members = scopeUsers.filter(u=>supOf[u.code]===sv.code);
       if(!members.length) return;
       const dd = userDistricts(sv);
-      groups.push({title:'سپروائزر: '+(sv.name||'')+' ('+sv.code+')'+(dd.length?' — '+dd.join('، '):''), users:members});
+      groups.push({code:sv.code, title:'سپروائزر: '+(sv.name||'')+' ('+sv.code+')'+(dd.length?' — '+dd.join('، '):''), users:members});
+    });
+    // جن کا سپروائزر تفویض نہیں (باکس) اور سپروائزر/ڈسٹرکٹ آفس کا اپنا سفر: یہ سب ضلعی ذمہ دار چیک کرتا ہے (determineCheckerStage)
+    const toDistrict = scopeUsers.filter(u=> (u.role==='box' && !supOf[u.code]) || u.role==='supervisor' || u.role==='district_office');
+    const dzList = allU.filter(u=>u.role==='district' && u.status!=='closed').sort((a,b)=>(a.name||'').localeCompare(b.name||''));
+    const placed = {};
+    dzList.forEach(dz=>{
+      const dzd = userDistricts(dz);
+      const members = toDistrict.filter(u=>userDistricts(u).some(d=>dzd.includes(d)));
+      if(!members.length) return;
+      members.forEach(u=>{ placed[u.code]=true; });
+      groups.push({code:dz.code, title:'ضلعی ذمہ دار: '+(dz.name||'')+' ('+dz.code+')'+(dzd.length?' — '+dzd.join('، '):'')+' — (جن کا سپروائزر تفویض نہیں + سپروائزر/ڈسٹرکٹ آفس کا اپنا سفر)', users:members});
     });
     if(!supFilter){
-      const unassigned = scopeUsers.filter(u=>u.role==='box' && !supOf[u.code]);
-      if(unassigned.length) groups.push({title:'بغیر سپروائزر کے باکس ذمہ داران (یہ براہ راست ضلع کے ذمہ دار کو جاتے ہیں)', users:unassigned});
-      const others = scopeUsers.filter(u=>u.role!=='box');
-      if(others.length) groups.push({title:'دیگر عہدے (سپروائزر کے ماتحت نہیں)', users:others});
+      const noOne = toDistrict.filter(u=>!placed[u.code]);
+      if(noOne.length) groups.push({code:'', title:'ضلع کا ذمہ دار مقرر نہیں (بغیر سپروائزر والے)', users:noOne});
+      const others = scopeUsers.filter(u=>u.role!=='box' && u.role!=='supervisor' && u.role!=='district_office');
+      if(others.length) groups.push({code:'', title:'دیگر عہدے (سپروائزر/ضلعی ذمہ دار کے ماتحت نہیں)', users:others});
+    }
+    if(supFilter){
+      const only = groups.filter(g=>g.code===supFilter);
+      groups.length = 0; only.forEach(g=>groups.push(g));
     }
     if(!groups.length){
-      box.innerHTML = '<div class="empty">'+(supFilter ? 'اس سپروائزر کو ابھی کوئی باکس ذمہ دار تفویض نہیں (یا منتخب ضلع میں نہیں)۔' : 'کوئی ذمہ دار موجود نہیں۔')+'</div>';
+      box.innerHTML = '<div class="empty">'+(supFilter ? 'اس کے نیچے ابھی کوئی ذمہ دار نہیں (یا منتخب ضلع میں نہیں)۔' : 'کوئی ذمہ دار موجود نہیں۔')+'</div>';
       return;
     }
-    html += '<div class="note" style="margin-bottom:8px;">سپروائزر وار رپورٹ: ہر سپروائزر کے نیچے وہ باکس ذمہ داران جو اسے "سپروائزر تفویض" میں دیے گئے ہیں۔</div>';
+    html += '<div class="note" style="margin-bottom:8px;">سپروائزر وار رپورٹ: ہر سپروائزر کے نیچے اس کے تفویض شدہ باکس ذمہ داران۔ جن باکس ذمہ داران کا سپروائزر تفویض نہیں، وہ ان کے ضلع کے ضلعی ذمہ دار کے نیچے دکھائے گئے ہیں (کیونکہ ان کا سفری ریکارڈ وہی چیک کرتا ہے)۔ اگر کسی ضلع کے دو ضلعی ذمہ دار ہوں تو وہ ذمہ دار دونوں کے نیچے آ سکتا ہے۔</div>';
     if(!supFilter && groups.length>1){
       html += cardHtml('مجموعی (Overall) — تمام سپروائزرز', scopeUsers, scopeUsers.map(u=>perUserResults[u.code]));
     }
