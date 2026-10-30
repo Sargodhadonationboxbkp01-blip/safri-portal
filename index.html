@@ -2230,7 +2230,8 @@ async function getAllUsers(){
 }
 // Determines the FIRST checker stage for a submitter, per the org hierarchy:
 // box -> supervisor (or district, if no supervisor assigned to that box) -> [district_office delivery] -> done
-// supervisor / district_office -> district -> [district_office delivery] -> done
+// supervisor -> division (Division Zimedar hi verify kar ke agle marhale, yani district_office, ko bhejta hai) -> [district_office delivery] -> done
+// district_office -> district -> [district_office delivery] -> done
 // district / division_reporting / division_repairing / division_fundraiser / division_coordinator -> division -> [district_office delivery] -> done
 async function determineCheckerStage(role, code){
   if(role==='box'){
@@ -2239,7 +2240,8 @@ async function determineCheckerStage(role, code){
     return hasSupervisor ? 'supervisor' : 'district';
   }
   if(role==='auditor') return 'division_coordinator';
-  if(role==='supervisor' || role==='district_office') return 'district';
+  if(role==='supervisor') return 'division';
+  if(role==='district_office') return 'district';
   if(role==='district' || isDivisionStaffRole(role)) return 'division';
   return 'district'; // sensible fallback (e.g. admin submitting on someone's behalf)
 }
@@ -2384,7 +2386,7 @@ function isRelevantSubmittedStage(a, submitterRole){
     // District Zimedar apne khud ke marhale ("district") ke ilawa, apne district ke Box Zimedaran ke woh
     // records bhi dekh (aur chahe to khud Approve/Reject bhi kar) sakta hai jo abhi Supervisor ke pass
     // pending hain — taake nigrani (oversight) rakh sake aur zaroorat par khud bhi aage bhej sake۔
-    return a.stage==='district' || a.stage==='supervisor';
+    return (a.stage==='district' && submitterRole!=='supervisor') || a.stage==='supervisor';
   }
   if(myRole==='division'){
     // Division Zimedar apne khud ke marhale ("division") ke ilawa، Supervisor ke apne (khud ke) safar
@@ -2452,11 +2454,13 @@ async function populateReportDistrictFilter(){
     const byName = (a,b)=>(a.name||'').localeCompare(b.name||'');
     const sups = pool.filter(u=>u.role==='supervisor' && u.status!=='closed').sort(byName);
     const dzs = pool.filter(u=>u.role==='district' && u.status!=='closed').sort(byName);
+    const dvs = (await getAllUsers()).filter(u=>u.role==='division' && u.status!=='closed').sort(byName);
     const optOf = x=>`<option value="${escapeHtml(x.code)}">${escapeHtml(x.name||'')} (${escapeHtml(x.code)})</option>`;
     supSel.innerHTML = '<option value="">-- سب (تمام سپروائزرز اور ضلعی ذمہ داران) --</option>'
       + (sups.length ? '<optgroup label="سپروائزرز">'+sups.map(optOf).join('')+'</optgroup>' : '')
-      + (dzs.length ? '<optgroup label="ضلعی ذمہ داران (بغیر سپروائزر والوں کے لیے)">'+dzs.map(optOf).join('')+'</optgroup>' : '');
-    supSel.value = (sups.concat(dzs)).some(x=>x.code===curSup) ? curSup : '';
+      + (dzs.length ? '<optgroup label="ضلعی ذمہ داران (بغیر سپروائزر والوں کے لیے)">'+dzs.map(optOf).join('')+'</optgroup>' : '')
+      + (dvs.length ? '<optgroup label="ڈویژن ذمہ داران (سپروائزرز کے لیے)">'+dvs.map(optOf).join('')+'</optgroup>' : '');
+    supSel.value = (sups.concat(dzs, dvs)).some(x=>x.code===curSup) ? curSup : '';
     const gbv = (document.getElementById('distReportGroupBy')||{}).value;
     if(supWrap) supWrap.classList.toggle('hidden', gbv!=='supervisor');
   }
@@ -3220,7 +3224,7 @@ async function renderApprovalBadge(){
     const submitterRole = (viewingUserObj && viewingUserObj.role) || 'box';
     const canAct = myRole==='admin'
       || (myRole==='supervisor' && appr.stage==='supervisor')
-      || (myRole==='district' && (appr.stage==='district' || appr.stage==='supervisor'))
+      || (myRole==='district' && ((appr.stage==='district' && submitterRole!=='supervisor') || appr.stage==='supervisor'))
       || (myRole==='division' && (appr.stage==='division' || (appr.stage==='district' && submitterRole==='supervisor')))
       || (myRole==='division_coordinator' && appr.stage==='division_coordinator')
       || (myRole==='district_office' && appr.stage==='district_office');
@@ -3442,7 +3446,7 @@ async function renderDistrictReport(){
       groups.push({code:sv.code, title:'سپروائزر: '+(sv.name||'')+' ('+sv.code+')'+(dd.length?' — '+dd.join('، '):''), users:members});
     });
     // جن کا سپروائزر تفویض نہیں (باکس) اور سپروائزر/ڈسٹرکٹ آفس کا اپنا سفر: یہ سب ضلعی ذمہ دار چیک کرتا ہے (determineCheckerStage)
-    const toDistrict = scopeUsers.filter(u=> (u.role==='box' && !supOf[u.code]) || u.role==='supervisor' || u.role==='district_office');
+    const toDistrict = scopeUsers.filter(u=> (u.role==='box' && !supOf[u.code]) || u.role==='district_office');
     const dzList = allU.filter(u=>u.role==='district' && u.status!=='closed').sort((a,b)=>(a.name||'').localeCompare(b.name||''));
     const placed = {};
     dzList.forEach(dz=>{
@@ -3450,11 +3454,23 @@ async function renderDistrictReport(){
       const members = toDistrict.filter(u=>userDistricts(u).some(d=>dzd.includes(d)));
       if(!members.length) return;
       members.forEach(u=>{ placed[u.code]=true; });
-      groups.push({code:dz.code, title:'ضلعی ذمہ دار: '+(dz.name||'')+' ('+dz.code+')'+(dzd.length?' — '+dzd.join('، '):'')+' — (جن کا سپروائزر تفویض نہیں + سپروائزر/ڈسٹرکٹ آفس کا اپنا سفر)', users:members});
+      groups.push({code:dz.code, title:'ضلعی ذمہ دار: '+(dz.name||'')+' ('+dz.code+')'+(dzd.length?' — '+dzd.join('، '):'')+' — (جن کا سپروائزر تفویض نہیں + ڈسٹرکٹ آفس کا اپنا سفر)', users:members});
+    });
+    // سپروائزرز کا اپنا سفر: ڈویژن ذمہ دار چیک کرتا ہے
+    const supsInScope = scopeUsers.filter(u=>u.role==='supervisor');
+    const dvList = allU.filter(u=>u.role==='division' && u.status!=='closed').sort((a,b)=>(a.name||'').localeCompare(b.name||''));
+    const placedSup = {};
+    dvList.forEach(dv=>{
+      const members = supsInScope.filter(u=>normLoc(u.division)!=='' && normLoc(u.division)===normLoc(dv.division));
+      if(!members.length) return;
+      members.forEach(u=>{ placedSup[u.code]=true; });
+      groups.push({code:dv.code, title:'ڈویژن ذمہ دار: '+(dv.name||'')+' ('+dv.code+')'+(dv.division?' — '+dv.division:'')+' — (سپروائزرز کا اپنا سفر)', users:members});
     });
     if(!supFilter){
       const noOne = toDistrict.filter(u=>!placed[u.code]);
       if(noOne.length) groups.push({code:'', title:'ضلع کا ذمہ دار مقرر نہیں (بغیر سپروائزر والے)', users:noOne});
+      const noDv = supsInScope.filter(u=>!placedSup[u.code]);
+      if(noDv.length) groups.push({code:'', title:'ڈویژن ذمہ دار مقرر نہیں / سپروائزر کا ڈویژن خالی (سپروائزرز)', users:noDv});
       const others = scopeUsers.filter(u=>u.role!=='box' && u.role!=='supervisor' && u.role!=='district_office');
       if(others.length) groups.push({code:'', title:'دیگر عہدے (سپروائزر/ضلعی ذمہ دار کے ماتحت نہیں)', users:others});
     }
@@ -3466,7 +3482,7 @@ async function renderDistrictReport(){
       box.innerHTML = '<div class="empty">'+(supFilter ? 'اس کے نیچے ابھی کوئی ذمہ دار نہیں (یا منتخب ضلع میں نہیں)۔' : 'کوئی ذمہ دار موجود نہیں۔')+'</div>';
       return;
     }
-    html += '<div class="note" style="margin-bottom:8px;">سپروائزر وار رپورٹ: ہر سپروائزر کے نیچے اس کے تفویض شدہ باکس ذمہ داران۔ جن باکس ذمہ داران کا سپروائزر تفویض نہیں، وہ ان کے ضلع کے ضلعی ذمہ دار کے نیچے دکھائے گئے ہیں (کیونکہ ان کا سفری ریکارڈ وہی چیک کرتا ہے)۔ اگر کسی ضلع کے دو ضلعی ذمہ دار ہوں تو وہ ذمہ دار دونوں کے نیچے آ سکتا ہے۔</div>';
+    html += '<div class="note" style="margin-bottom:8px;">سپروائزر وار رپورٹ: ہر سپروائزر کے نیچے اس کے تفویض شدہ باکس ذمہ داران۔ جن باکس ذمہ داران کا سپروائزر تفویض نہیں، وہ ان کے ضلع کے ضلعی ذمہ دار کے نیچے دکھائے گئے ہیں (کیونکہ ان کا سفری ریکارڈ وہی چیک کرتا ہے)۔ سپروائزرز کا اپنا سفر ان کے ڈویژن ذمہ دار کے نیچے دکھایا گیا ہے۔ اگر کسی ضلع کے دو ضلعی ذمہ دار ہوں تو وہ ذمہ دار دونوں کے نیچے آ سکتا ہے۔</div>';
     if(!supFilter && groups.length>1){
       html += cardHtml('مجموعی (Overall) — تمام سپروائزرز', scopeUsers, scopeUsers.map(u=>perUserResults[u.code]));
     }
@@ -3910,7 +3926,7 @@ async function showLedgerPreviewModal(overrideCode, overrideYear, overrideMonth)
       const submitterRole = (submitterDoc && submitterDoc.role) || 'box';
       const canAct = myRole==='admin'
         || (myRole==='supervisor' && appr.stage==='supervisor')
-        || (myRole==='district' && (appr.stage==='district' || appr.stage==='supervisor'))
+        || (myRole==='district' && ((appr.stage==='district' && submitterRole!=='supervisor') || appr.stage==='supervisor'))
         || (myRole==='division' && (appr.stage==='division' || (appr.stage==='district' && submitterRole==='supervisor')))
         || (myRole==='division_coordinator' && appr.stage==='division_coordinator')
         || (myRole==='district_office' && appr.stage==='district_office');
