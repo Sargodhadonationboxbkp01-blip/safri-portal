@@ -3773,21 +3773,28 @@ async function addRemark(){
 /* ---------------- ledger data (shared by preview + PDF; supports override for bulk export of other records) ---------------- */
 async function buildLedgerData(overrideCode, overrideYear, overrideMonth, useCache){
   let profile, slabs, defaultRate, hideEmpty;
+  const code = overrideCode || activeCode();
+  const orgP = loadOrgName();
+  let apprP, mapP;
   if(overrideCode){
-    profile = (await fsGet('profiles', overrideCode)) || {};
-    const u = await fsGet('users', overrideCode);
+    // دوسرے ذمہ دار کا ڈیٹا: ساری calls ایک ہی وقت میں (پہلے ایک کے بعد ایک آتی تھیں، ہر ایک ~1.5-2 سیکنڈ کا راستہ)
+    apprP = (useCache ? fsGetCached : fsGet)('approvals', approvalDocId(code, overrideYear, overrideMonth));
+    mapP = getMonthEntryMapFor(code, overrideYear, overrideMonth);
+    const [pr, u, globalCfg, sl] = await Promise.all([
+      fsGet('profiles', overrideCode), fsGet('users', overrideCode), loadGlobalPetrolConfig(), fsGet('slabs', overrideCode)
+    ]);
+    profile = pr || {};
     profile.name = profile.name || (u?u.name:overrideCode);
     profile.role = u ? u.role : 'box';
     profile.code = overrideCode;
     profile.year = overrideYear;
     profile.month = overrideMonth;
-    const globalCfg = await loadGlobalPetrolConfig();
     const userRole = u ? u.role : 'box';
     if(globalCfg.enabled && userRole!=='admin'){
       slabs = globalCfg.slabs||[]; defaultRate = globalCfg.defaultRate||0;
     } else {
-      const s = (await fsGet('slabs', overrideCode)) || {slabs:[], defaultRate:0};
-      slabs = s.slabs||[]; defaultRate = s.defaultRate||0;
+      const s2 = sl || {slabs:[], defaultRate:0};
+      slabs = s2.slabs||[]; defaultRate = s2.defaultRate||0;
     }
     hideEmpty = true;
   } else {
@@ -3796,11 +3803,10 @@ async function buildLedgerData(overrideCode, overrideYear, overrideMonth, useCac
     defaultRate = parseFloat(document.getElementById('pDefaultRate').value)||0;
     hideEmpty = document.getElementById('hideEmptyDays').checked;
   }
-  const code = overrideCode || activeCode();
-  // org ka naam aur approval, entries ke saath EK hi waqt mein mangwate hain (pehle ek ke baad ek aate thay)
-  const orgP = loadOrgName();
-  const apprP = (useCache ? fsGetCached : fsGet)('approvals', approvalDocId(code, profile.year, profile.month));
-  const map = await getMonthEntryMapFor(code, profile.year, profile.month);
+  // approval aur entries: override ki surat mein pehle hi shuru ho chuki hain
+  apprP = apprP || (useCache ? fsGetCached : fsGet)('approvals', approvalDocId(code, profile.year, profile.month));
+  mapP = mapP || getMonthEntryMapFor(code, profile.year, profile.month);
+  const map = await mapP;
 
   let totalKm=0,totalFare=0,totalPetrol=0,totalMaintenance=0;
   const daysInMonth=new Date(profile.year, profile.month+1, 0).getDate();
@@ -3916,16 +3922,19 @@ async function showLedgerPreviewModal(overrideCode, overrideYear, overrideMonth)
     const code = overrideCode || activeCode();
     let year=overrideYear, month=overrideMonth;
     if(!overrideCode){ const p=getProfileFromForm(); year=p.year; month=p.month; }
+    // ٹکٹس کی تصویریں ساتھ ساتھ منگوائیں (پہلے تصویر بننے کے بعد، الگ سے، ایک اور راؤنڈ لیتی تھیں)
+    const ticketsP = loadAttachments(code, year, month).catch(e=>{ console.error(e); return []; });
     const canvas = await drawLedgerCanvas(overrideCode, overrideYear, overrideMonth);
     const dataUrl = canvas.toDataURL('image/jpeg', 0.9);
-
-    const appr = await fsGet('approvals', approvalDocId(code, year, month), {slim:true});
+    const ld = canvas.ledgerData;
+    // approval اور ذمہ دار کا role وہی جو تصویر بناتے وقت تازہ آ چکا — دوبارہ سرور سے نہیں مانگتے
+    const appr = (ld && ld.approval !== undefined) ? ld.approval : await fsGet('approvals', approvalDocId(code, year, month), {slim:true});
     const isOwn = code===currentUser.code;
     const myRole = currentUser.role||'box';
     let actionHtml='';
     if(!isOwn && appr && appr.status==='submitted'){
-      const submitterDoc = await fsGet('users', code);
-      const submitterRole = (submitterDoc && submitterDoc.role) || 'box';
+      let submitterRole = (ld && ld.profile && ld.profile.role) || '';
+      if(!submitterRole){ const submitterDoc = await fsGet('users', code); submitterRole = (submitterDoc && submitterDoc.role) || 'box'; }
       const canAct = myRole==='admin'
         || (myRole==='supervisor' && appr.stage==='supervisor')
         || (myRole==='district' && ((appr.stage==='district' && submitterRole!=='supervisor') || appr.stage==='supervisor'))
@@ -3945,7 +3954,7 @@ async function showLedgerPreviewModal(overrideCode, overrideYear, overrideMonth)
     // Show ticket/receipt photos too, so the checker can verify tickets before approving the safar
     let ticketsHtml='';
     try{
-      const tickets = await loadAttachments(code, year, month);
+      const tickets = await ticketsP;
       if(tickets && tickets.length){
         ticketsHtml = `<div style="margin-top:14px;"><div class="note" style="margin-bottom:6px;">🧾 اس مہینے کی ٹکٹس/رسیدیں (${tickets.length}) — تصدیق کے لیے دیکھیں:</div>
           <div style="display:flex;flex-wrap:wrap;gap:8px;">${tickets.map((t,i)=>`<img src="${t.dataUrl}" style="width:90px;height:90px;object-fit:cover;border-radius:6px;border:1px solid var(--line);cursor:pointer;" onclick="window.open('${t.dataUrl}','_blank')">`).join('')}</div></div>`;
@@ -4321,6 +4330,7 @@ async function drawLedgerCanvas(overrideCode, overrideYear, overrideMonth){
     sigX -= (sigW+40);
   }
 
+  canvas.ledgerData = data; // preview dobara approval/user na mangay
   return canvas;
 }
 
