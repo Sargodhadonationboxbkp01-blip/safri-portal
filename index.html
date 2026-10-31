@@ -747,7 +747,7 @@ function _logSpeed(action, params, totalMs, serverMs){
   _speedLog.push({at:new Date().toLocaleTimeString('en-GB'), what:action+' '+(p.col||'')+((p.id||p.code)?(' '+(p.id||p.code)):''), total:Math.round(totalMs), server:(typeof serverMs==='number'?serverMs:null)});
   if(_speedLog.length>300) _speedLog.shift();
 }
-async function _apiCall(action, params, bodyObj, _isRetry){
+async function _apiCall(action, params, bodyObj, _isRetry, _busyTry){
   const _t0 = performance.now();
   const url = new URL(BACKEND_URL);
   url.searchParams.set('action', action);
@@ -774,6 +774,11 @@ async function _apiCall(action, params, bodyObj, _isRetry){
   }
   const json = await res.json();
   _logSpeed(action, params, performance.now()-_t0, json && json.serverMs);
+  // "server busy" (doosra save lock pakde hue hai) ka matlab hai ke is request par kuch bhi nahi hua — dobara bhejna bilkul mehfooz hai
+  if(json && json.error && /server busy/i.test(json.error) && (_busyTry||0) < 3){
+    await new Promise(r=>setTimeout(r, 1500*((_busyTry||0)+1)));
+    return _apiCall(action, params, bodyObj, _isRetry, (_busyTry||0)+1);
+  }
   if(json && json.error){
     // Yeh server ne khud bataya hai (misal: masroof hai, ya din ki hadd puri ho gayi) — is
     // par foran dobara koshish karne se koi faida nahi (behtar nahi hoga), sirf waqt aur
@@ -811,15 +816,20 @@ async function fsGetEntryFull(id){
   try{ const r = await _apiCall('get', {col:'entries', id}); return r.data; }
   catch(e){ console.error(e); toast('سرور سے ڈیٹا لینے میں خرابی — انٹرنیٹ/سرور چیک کریں'); return null; }
 }
+let _lastSaveError = '';
 async function fsSet(col,id,data){
   try{
     await _apiCall('set', {col, id}, data);
     _fsInvalidate(col);
+    _lastSaveError = '';
     return true;
   }catch(e){
     console.error(e);
+    _lastSaveError = String((e && (e.raw || e.message)) || e);
     if(/unauthorized/i.test(e.raw||'')){
       toast('محفوظ نہیں ہو سکا: API key غلط ہے (Code.gs سے ملائیں)');
+    } else if(e && e.isApiError){
+      toast('سرور نے محفوظ کرنے سے انکار کیا: ' + _lastSaveError.substring(0,140)); // اصل وجہ دکھائیں
     } else {
       toast('سرور پر محفوظ کرنے میں خرابی — انٹرنیٹ/سرور چیک کریں');
     }
@@ -3149,7 +3159,7 @@ async function approveStage(code, year, month, signatureDataUrl){
     toast(newStatus==='approved' ? 'حتمی منظوری دے دی گئی ✓ — فنانس ڈیپارٹمنٹ کو بھیج دیا گیا' : 'منظور کر کے اگلے مرحلے (ڈسٹرکٹ آفس ذمہ دار) کو بھیج دیا گیا ✓');
     return true;
   }
-  toast('محفوظ کرنے میں خرابی'); return false;
+  toast('منظوری محفوظ نہیں ہوئی — ' + (_lastSaveError ? _lastSaveError.substring(0,140) : 'سرور/انٹرنیٹ چیک کریں') + ' (ریکارڈ ابھی تک جمع شدہ ہی ہے، دوبارہ کوشش کریں)'); return false;
 }
 async function approveCurrentStage(signatureDataUrl){
   const profile=getProfileFromForm();
@@ -3189,7 +3199,7 @@ async function sendBackToOwner(code, year, month){
   const resetStage = submitter ? await determineCheckerStage(submitter.role||'box', code) : 'supervisor';
   const ok = await fsSet('approvals', id, {code, year, month, status:'needs_revision', stage:resetStage, history, by:entry.by, at:entry.at, note});
   if(ok){ toast('ریکارڈ واپس بھیج دیا گیا ✓ — ذمہ دار اب دوبارہ ترمیم کر سکتا ہے'); return true; }
-  toast('محفوظ کرنے میں خرابی'); return false;
+  toast('واپس بھیجنا محفوظ نہیں ہوا — ' + (_lastSaveError ? _lastSaveError.substring(0,140) : 'سرور/انٹرنیٹ چیک کریں')); return false;
 }
 async function sendBackFromPreview(code, year, month){
   const sure = confirm('کیا آپ یہ سفری ریکارڈ واپس ذمہ دار کو بھیجنا چاہتے ہیں؟');
