@@ -1182,6 +1182,8 @@ function fmtNum(n){ return (Math.round((n||0)*100)/100).toLocaleString('en-US');
 // "حتمی" (final) رقوم (پٹرول، مینٹینس، بل، خالص ادائیگی) کے لیے — پوائنٹ کے بعد کے ہندسے ہٹا کر
 // قریب ترین پورے روپے تک راؤنڈ آف کر کے دکھاتا ہے (مثلاً 127.25 → 127)۔
 function fmtNumRound(n){ return Math.round(n||0).toLocaleString('en-US'); }
+// کلومیٹر: floating-point کے فالتو ہندسے ہٹا کر زیادہ سے زیادہ 2 اعشاریہ (مثلاً 39.100000000000364 → 39.1)
+function roundKm(n){ const x=parseFloat(n); return isFinite(x) ? Math.round(x*100)/100 : 0; }
 
 let currentUser=null;
 let currentSlabs=[];
@@ -2848,7 +2850,7 @@ async function renderDaysList(){
       totalKm+=e.km||0; totalFare+=e.fare||0; totalPetrol+=petrol; totalMaintenance+=maintenance;
     }
     const detailLine = filled
-      ? [ e.travel?('سفر: '+e.travel):'', e.activity?('مصروفیت: '+e.activity):'', 'کلومیٹر: '+(e.km||0),
+      ? [ e.travel?('سفر: '+e.travel):'', e.activity?('مصروفیت: '+e.activity):'', 'کلومیٹر: '+roundKm(e.km||0),
           'کرایہ: '+fmtNum(e.fare||0) ].filter(Boolean).join(' · ')
       : 'کوئی اندراج نہیں';
     const editBadge = (e && e.editedBy) ? `<div class="edit-badge">✏️ ترمیم: ${escapeHtml(e.editedBy.name)} (${ROLE_LABELS[e.editedBy.role]||e.editedBy.role})</div>` : '';
@@ -3644,7 +3646,7 @@ async function openDayEditor(dateStr){
           </div>`:''}
         </div>
       </div>
-      <div class="field"><label>کلومیٹر (میٹر سے خودکار، یا خود لکھیں)</label><input type="number" id="eKm" value="${e.km||''}" ${dis}></div>
+      <div class="field"><label>کلومیٹر (میٹر سے خودکار، یا خود لکھیں)</label><input type="number" id="eKm" value="${e.km?roundKm(e.km):''}" ${dis}></div>
       <div class="field"><label>کرایہ</label><input type="number" id="eFare" step="0.01" value="${e.fare||''}" ${dis}></div>
       <div class="btn-row">
         ${locked ? '' : '<button class="btn-primary" onclick="saveDayEntry()">محفوظ کریں</button>'}
@@ -3716,7 +3718,7 @@ async function handleMeterPhotoUpload(evt, which){
 function onMeterChange(){
   const ms=parseFloat(document.getElementById('eMeterStart').value)||0;
   const me=parseFloat(document.getElementById('eMeterEnd').value)||0;
-  document.getElementById('eKm').value = Math.max(0, me-ms);
+  document.getElementById('eKm').value = roundKm(Math.max(0, me-ms));
 }
 function closeDayEditor(){
   if(openDayDate){
@@ -3758,6 +3760,7 @@ async function saveDayEntry(){
   const meterEnd=parseFloat(document.getElementById('eMeterEnd').value)||0;
   let km=parseFloat(document.getElementById('eKm').value);
   if(isNaN(km)) km=Math.max(0, meterEnd-meterStart);
+  km = roundKm(km);
   const travelFrom=document.getElementById('eTravelFrom').value.trim();
   const travelTo=document.getElementById('eTravelTo').value.trim();
   const travel = (travelFrom||travelTo) ? (travelFrom + (travelFrom&&travelTo?' سے ':'') + travelTo + (travelFrom&&travelTo?' تک':'')) : '';
@@ -3868,7 +3871,7 @@ async function buildLedgerData(overrideCode, overrideYear, overrideMonth, useCac
       date:dateStr, day:dayName,
       activity:e?(e.activity||''):'', travel:e?(e.travel||''):'',
       meterStart:e?(e.meterStart||''):'', meterEnd:e?(e.meterEnd||''):'',
-      km:e?(e.km||0):'', fare:e?(e.fare||''):'',
+      km:e?roundKm(e.km||0):'', fare:e?(e.fare||''):'',
       maintenance: filled?maintenance:'', editedBy: e&&e.editedBy?e.editedBy.name:''
     });
   }
