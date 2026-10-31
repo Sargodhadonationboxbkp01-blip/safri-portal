@@ -2161,7 +2161,12 @@ async function renderRateBreakdownPreview(){
 }
 
 /* ---------------- tabs ---------------- */
+function isAdminOwnView(){ return !!(currentUser && currentUser.role==='admin' && !viewingCode); }
 function showAppTab(which){
+  // ایڈمن آئی ڈی (اپنی ID) پر ماہانہ ریکارڈ اندراج نہیں۔ کسی ذمہ دار کا ریکارڈ کھولنے (چیک/اپڈیٹ) پر یہ ٹیبز واپس آ جاتے ہیں۔
+  const adminOwn = isAdminOwnView();
+  ['tabDaily','tabPdf'].forEach(id=>{ const el=document.getElementById(id); if(el) el.classList.toggle('hidden', adminOwn); });
+  if(adminOwn && (which==='daily' || which==='pdf')) which='dashboard';
   ['Dashboard','Profile','Petrol','Daily','Sub','Submitted','Verified','AddUser','AssignSup','Reports','Pdf'].forEach(t=>{
     const el=document.getElementById('tab'+t);
     if(el) el.classList.toggle('active', t.toLowerCase()===which);
@@ -2245,7 +2250,12 @@ async function determineCheckerStage(role, code){
   if(role==='district' || isDivisionStaffRole(role)) return 'division';
   return 'district'; // sensible fallback (e.g. admin submitting on someone's behalf)
 }
+// ایڈمن آئی ڈی صرف ریکارڈ چیک/اپڈیٹ کرنے کے لیے ہے — کسی کے بھی ماتحت/فہرست/رپورٹ میں نظر نہیں آتی
 async function getSubordinates(){
+  const list = await getSubordinatesRaw_();
+  return list.filter(u=>u && u.role!=='admin');
+}
+async function getSubordinatesRaw_(){
   const role=currentUser.role||'box';
   const allWithSelf=await getAllUsers();
   const all=allWithSelf.filter(u=>u.code!==currentUser.code);
@@ -2436,7 +2446,7 @@ async function populateReportDistrictFilter(){
   const wrap = document.getElementById('distReportDistrictWrap');
   const sel = document.getElementById('distReportDistrict');
   const myRole = currentUser.role||'box';
-  const scopeUsers = myRole==='admin' ? (await getAllUsers()) : (await getSubordinates());
+  const scopeUsers = (myRole==='admin' ? (await getAllUsers()) : (await getSubordinates())).filter(u=>u.role!=='admin');
   const rawDistricts = [...new Set(scopeUsers.flatMap(u=> (Array.isArray(u.districts)&&u.districts.length)?u.districts:(u.district?[u.district]:[]) ))].filter(Boolean).sort();
   wrap.classList.toggle('hidden', rawDistricts.length<=1);
   // سپروائزر وار رپورٹ کا آپشن (صرف admin / district / district_office کو)
@@ -3094,6 +3104,7 @@ async function adminClearMonthEntries(){
   renderApprovalBadge();
 }
 async function submitMonth(signatureDataUrl){
+  if(isAdminOwnView()){ toast('ایڈمن آئی ڈی پر ماہانہ ریکارڈ درج نہیں ہو سکتا — یہ صرف چیک اور اپڈیٹ کے لیے ہے'); return; }
   if(!(await flushPendingSaves(activeCode()))){ toast('آخری سفر ابھی سرور پر محفوظ نہیں ہوا — مہینہ جمع نہیں کروایا گیا، انٹرنیٹ چیک کر کے دوبارہ کوشش کریں'); return; }
   const profile=getProfileFromForm();
   const id=approvalDocId(activeCode(), profile.year, profile.month);
@@ -3106,6 +3117,7 @@ async function submitMonth(signatureDataUrl){
   if(ok){ toast('یہ مہینہ جمع کروا دیا گیا ✓ — اب '+stageLabel(checkerStage)+' کے پاس بھیج دیا گیا ہے'); renderApprovalBadge(); renderDaysList(); } else toast('محفوظ کرنے میں خرابی');
 }
 async function submitWithSignature(){
+  if(isAdminOwnView()){ toast('ایڈمن آئی ڈی پر ماہانہ ریکارڈ درج نہیں ہو سکتا — یہ صرف چیک اور اپڈیٹ کے لیے ہے'); return; }
   if(!(await flushPendingSaves(activeCode()))){ toast('آخری سفر ابھی سرور پر محفوظ نہیں ہوا — انٹرنیٹ چیک کر کے دوبارہ کوشش کریں'); return; }
   const profile=getProfileFromForm();
   const sure = confirm('کیا آپ '+urduMonths[profile.month]+' '+profile.year+' کا سفری ریکارڈ جمع کروانا چاہتے ہیں؟ جمع کروانے کے بعد آپ خود اس میں ترمیم نہیں کر سکیں گے۔');
@@ -3329,7 +3341,7 @@ async function renderDistrictReport(){
   const supFilter = groupBy==='supervisor' ? ((document.getElementById('distReportSupervisor')||{}).value || '') : '';
 
   let scopeUsers = isAdmin
-    ? (await getAllUsers()).filter(u=>u.status!=='closed')
+    ? (await getAllUsers()).filter(u=>u.status!=='closed' && u.role!=='admin')
     : (await getSubordinates()).filter(u=>u.status!=='closed');
   if(fDistrictNorm){
     scopeUsers = scopeUsers.filter(u=>userDistricts(u).includes(fDistrictNorm));
@@ -3502,6 +3514,21 @@ async function renderDistrictReport(){
 }
 async function renderDashboard(){
   const body=document.getElementById('dashboardBody');
+  if(isAdminOwnView()){
+    // ایڈمن آئی ڈی: اپنا ماہانہ ریکارڈ نہیں — صرف چیک/اپڈیٹ کے راستے
+    body.innerHTML = `
+      <p style="margin-top:0;">خوش آمدید، <b>${escapeHtml(currentUser.name)}</b> (${ROLE_LABELS['admin']})</p>
+      <div class="note">یہ ایڈمن آئی ڈی صرف ریکارڈ <b>چیک اور اپڈیٹ</b> کرنے کے لیے ہے — اس پر ماہانہ سفری ریکارڈ درج نہیں ہوتا۔</div>
+      <div class="dash-actions">
+        <div class="dash-action" onclick="showAppTab('sub')"><span class="ic">👥</span>ماتحت ریکارڈ</div>
+        <div class="dash-action" onclick="showAppTab('submitted')"><span class="ic">📥</span>جمع شدہ</div>
+        <div class="dash-action" onclick="showAppTab('verified')"><span class="ic">✅</span>تصدیق شدہ</div>
+        <div class="dash-action" onclick="showAppTab('reports')"><span class="ic">📊</span>رپورٹس</div>
+        <div class="dash-action" onclick="showAppTab('petrol')"><span class="ic">⛽</span>پٹرول ریٹس</div>
+        <div class="dash-action" onclick="showAppTab('profile')"><span class="ic">👤</span>پروفائل اپڈیٹ کریں</div>
+      </div>`;
+    return;
+  }
   body.innerHTML='<div class="empty">لوڈ ہو رہا ہے...</div>';
   const needSubCount = (currentUser.role!=='box' && !viewingCode);
   let data, appr, subsList;
@@ -3546,6 +3573,7 @@ let openDayLocked=false, openDayLockedAt=0; // din kholte waqt ka 'mahina jama h
 let originalDayPhotos={start:null, end:null}; // din kholte waqt ki photos — taake sirf badli hui photo hi bheji jaye
 let pendingPhotoUploads={start:null, end:null};
 async function openDayEditor(dateStr){
+  if(isAdminOwnView()){ toast('ایڈمن آئی ڈی پر ماہانہ ریکارڈ درج نہیں ہو سکتا — یہ صرف چیک اور اپڈیٹ کے لیے ہے'); return; }
   if(openDayDate && openDayDate!==dateStr){
     const prevSlot=document.getElementById('slot-'+openDayDate);
     if(prevSlot) prevSlot.innerHTML='';
@@ -3707,6 +3735,7 @@ async function ensurePendingMeterPhotosProcessed(){
   }
 }
 async function saveDayEntry(){
+  if(isAdminOwnView()){ toast('ایڈمن آئی ڈی پر ماہانہ ریکارڈ درج نہیں ہو سکتا — یہ صرف چیک اور اپڈیٹ کے لیے ہے'); return; }
   if(!openDayDate) return;
   const lockedNow = (openDayLockedAt && (Date.now()-openDayLockedAt)<120000) ? openDayLocked : await isMonthLockedForOwner();
   if(lockedNow){ toast('یہ مہینہ جمع کروایا جا چکا ہے، ترمیم ممکن نہیں'); return; }
