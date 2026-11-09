@@ -2498,6 +2498,12 @@ function userDistricts(u){
   if(u && Array.isArray(u.districts) && u.districts.length) return u.districts.map(normLoc).filter(Boolean);
   return (u && u.district) ? [normLoc(u.district)] : [];
 }
+// ڈسٹرکٹ آفس کے لیے: باکس/سپروائزر کے 2 اضلاع ہوں تو اس کا سفر صرف اس کے "پہلے" ضلع کے ڈسٹرکٹ آفس ذمہ دار کے پاس جائے (دہرا نہ ہو)
+function primaryDistrict(u){ const d=userDistricts(u); return d.length ? d[0] : ''; }
+function inDistrictOfficeScope(u, myDistricts){
+  if(u && (u.role==='box' || u.role==='supervisor')){ const pd=primaryDistrict(u); return !!pd && myDistricts.includes(pd); }
+  return userDistricts(u).some(d=>myDistricts.includes(d));
+}
 function displayDistricts(u){
   if(u && Array.isArray(u.districts) && u.districts.length) return u.districts.join('، ');
   return (u && u.district) || '';
@@ -2561,7 +2567,7 @@ async function getSubordinatesRaw_(){
     // them to Finance. So its scope is everyone (any role, INCLUDING itself — its own safar is checked by the
     // District Zimedar) assigned to the same district(s), for the "تصدیق شدہ" tab, so the district's file is complete.
     const myDistricts=userDistricts(currentUser);
-    return allWithSelf.filter(u=> userDistricts(u).some(d=>myDistricts.includes(d)));
+    return allWithSelf.filter(u=> inDistrictOfficeScope(u, myDistricts));
   }
   if(role==='supervisor'){
     if(Array.isArray(currentUser.assignedBoxCodes) && currentUser.assignedBoxCodes.length){
@@ -3006,7 +3012,7 @@ async function downloadDistrictExcelSummary(){
   noteEl.textContent='Excel تیار ہو رہی ہے، براہ کرم انتظار کریں...';
 
   const allUsers = await getAllUsers();
-  const districtUsers = allUsers.filter(u=> u.status!=='closed' && userDistricts(u).some(d=>myDistricts.includes(d)))
+  const districtUsers = allUsers.filter(u=> u.status!=='closed' && inDistrictOfficeScope(u, myDistricts))
     .sort((a,b)=> (a.name||'').localeCompare(b.name||''));
 
   if(!districtUsers.length){ noteEl.textContent='اس ضلع میں کوئی ایکٹو ذمہ دار نہیں ملا۔'; return; }
