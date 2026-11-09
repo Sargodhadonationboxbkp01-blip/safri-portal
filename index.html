@@ -143,6 +143,7 @@
   .dash-action .ic{display:block;font-size:22px;margin-bottom:6px;}
   .modal-overlay{display:flex;align-items:center;justify-content:center;}
   @keyframes spin{to{transform:rotate(360deg);}}
+  .day-row.date-locked{opacity:.65;}
 </style>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 </head>
@@ -225,6 +226,7 @@
       <div class="tab hidden" id="tabVerified" onclick="showAppTab('verified')"><span class="ic">✅</span>تصدیق شدہ</div>
       <div class="tab hidden" id="tabAddUser" onclick="showAppTab('adduser')"><span class="ic">➕</span>نیا ذمہ دار</div>
       <div class="tab hidden" id="tabAssignSup" onclick="showAppTab('assignsup')"><span class="ic">🎯</span>سپروائزر تفویض</div>
+      <div class="tab hidden" id="tabPermits" onclick="showAppTab('permits')"><span class="ic">📅</span>تاریخ کی اجازت</div>
       <div class="tab hidden" id="tabReports" onclick="showAppTab('reports')"><span class="ic">📊</span>رپورٹس</div>
       <div class="tab" id="tabPdf" onclick="showAppTab('pdf')"><span class="ic">📄</span>PDF</div>
     </div>
@@ -641,6 +643,37 @@
       </div>
     </div>
 
+    <!-- DATE PERMITS TAB (admin only) -->
+    <div class="card hidden" id="permitsTab">
+      <div class="card-head"><span class="lbl">📅 پچھلی تاریخ کی اجازت</span></div>
+      <div class="card-body">
+        <div class="note">ذمہ دار عام طور پر صرف <b>آج سمیت پچھلے 2 دن</b> کا یومیہ اندراج کر سکتا ہے۔ اس سے پرانی تاریخ کا اندراج رہ جائے تو یہاں سے اجازت دیں: <b>کس تاریخ سے</b> (موجودہ یا پچھلے مہینے کی) اور <b>کتنی دیر کے لیے</b>۔ وقت ختم ہوتے ہی اجازت خود بند ہو جاتی ہے، اور ذمہ دار دوبارہ صرف پچھلے 2 دن لکھ سکتا ہے۔</div>
+        <div class="field"><label>کس کو اجازت دینی ہے</label>
+          <select id="permitScope" onchange="onPermitScopeChange()">
+            <option value="one">ایک ذمہ دار (ذمہ دار وائز)</option>
+            <option value="district">ضلع کے تمام ذمہ داران (ضلع وائز)</option>
+            <option value="division">پوری ڈویژن کے تمام ذمہ داران (ڈویژن وائز)</option>
+          </select></div>
+        <div id="permitOneBox">
+          <div class="field"><label>ذمہ دار تلاش کریں (نام یا ID)</label><input type="text" id="permitSearchBox" oninput="filterPermitUsers()" placeholder="نام یا ID لکھیں..." autocomplete="off"></div>
+          <div id="permitSearchResults"></div>
+          <div id="permitChosen" class="note hidden" style="margin-top:8px;"></div>
+        </div>
+        <div id="permitGroupBox" class="hidden">
+          <div class="field"><label id="permitGroupLabel">ضلع منتخب کریں</label><select id="permitGroupSel" onchange="updatePermitGroupInfo()"></select></div>
+          <div id="permitGroupInfo" class="note" style="margin-top:8px;"></div>
+        </div>
+        <div class="row2" style="margin-top:8px;">
+          <div class="field"><label>کس تاریخ سے اجازت</label><input type="date" id="permitFrom"></div>
+          <div class="field"><label>کتنی دیر کے لیے</label><select id="permitHours"><option value="5">5 گھنٹے</option><option value="12">12 گھنٹے</option><option value="24">1 دن (24 گھنٹے)</option><option value="48">2 دن (48 گھنٹے)</option></select></div>
+        </div>
+        <button class="btn-primary" style="margin-top:10px;" onclick="grantPermit()">✅ اجازت دیں</button>
+        <h4 style="margin:18px 0 6px;">فعال اجازتیں</h4>
+        <div id="permitRevokeAllBox" class="hidden" style="margin-bottom:8px;"><button class="btn-ghost btn-sm" onclick="revokeAllPermits()">🛑 سب کی اجازتیں ایک ساتھ ختم کریں</button></div>
+        <div id="permitList"></div>
+      </div>
+    </div>
+
     <div class="card hidden" id="dangerZoneCard" style="border:2px solid var(--danger);">
       <div class="card-head" style="background:#fde3e3;"><span class="lbl" style="color:var(--danger);">⚠️ خطرناک زون</span></div>
       <div class="card-body">
@@ -720,8 +753,12 @@
    ===================================================================================== */
 
 /* ================== یہاں اپنی Apps Script ویب ایپ کی تفصیل پیسٹ کریں ================== */
+/*@ENV_BEGIN*/
+const APP_ENV = "live"; // "live" = اصلی پورٹل
 const BACKEND_URL = "https://script.google.com/macros/s/AKfycbycQm0RGb8lGeGe2LmE_3k7RyKUtEDBWK2fwClrb488bwfeinxpBLuuSjESNVnXONqkQA/exec";
 const API_KEY = "Sf9k2mQz7xLp4vNw8eRt3yUiH6dGbCjA"; // وہی سیکرٹ جو Code.gs میں API_KEY میں لکھی
+/*@ENV_END*/
+const ENV_PREFIX = 'safri_'; // live کی پرانی چابیاں (localStorage) جوں کی توں
 /* =================================================================================== */
 
 const CONFIG_IS_SET = !!(BACKEND_URL && !BACKEND_URL.includes("YOUR_DEPLOYMENT_ID") && API_KEY && !API_KEY.includes("YOUR_API_KEY_HERE"));
@@ -734,7 +771,7 @@ const CONFIG_IS_SET = !!(BACKEND_URL && !BACKEND_URL.includes("YOUR_DEPLOYMENT_I
 const _fsCache = { listAll:{}, listWhere:{} };
 const FS_CACHE_TTL = 20000; // 20 seconds
 const _getMemo = {}; // col::id -> {t, p}  (sirf fsGetCached istemal karta hai)
-const GET_MEMO_TTL = {config:60000, approvals:30000, users:20000, profiles:20000, slabs:20000};
+const GET_MEMO_TTL = {config:60000, approvals:30000, users:20000, profiles:20000, slabs:20000, permits:15000};
 function cloneJson(v){ return (v===null||v===undefined) ? v : JSON.parse(JSON.stringify(v)); }
 function _fsInvalidate(col){
   Object.keys(_getMemo).forEach(k=>{ if(k.indexOf(col+'::')===0) delete _getMemo[k]; });
@@ -845,8 +882,8 @@ async function fsDelete(col,id){
    (server ka jawab ana baaqi), phir ek qatar (queue) mein ek ke baad ek server par jati hai. Server "ok" kahe
    tab hi entry qatar se hatti hai. Nakam ho to khud dobara koshish karti rehti hai (page band ho kar dobara khule
    tab bhi). Qatar khali na ho to: upar paTTi nazar aati hai, page band karne par warning, mahina jama nahi hota. */
-const PENDING_KEY = 'safri_pending_saves_v1';
-const PENDING_LOCK_KEY = 'safri_pending_lock_v1';
+const PENDING_KEY = ENV_PREFIX+'pending_saves_v1';
+const PENDING_LOCK_KEY = ENV_PREFIX+'pending_lock_v1';
 const _pend = { draining:false, timer:null, hadItems:false, tabId:Math.random().toString(36).slice(2), lastErr:'' };
 function _pendRead(){
   try{ const raw=localStorage.getItem(PENDING_KEY); return raw ? (JSON.parse(raw)||{}) : {}; }
@@ -919,7 +956,7 @@ async function pendingDrain(force){
     while(true){
       const all=_pendRead();
       const now=Date.now();
-      const ready=Object.keys(all).filter(id=>!tried[id] && (force || !all[id].nextTry || all[id].nextTry<=now))
+      const ready=Object.keys(all).filter(id=>!tried[id] && !all[id].blocked && (force || !all[id].nextTry || all[id].nextTry<=now))
         .sort((a,b)=>all[a].queuedAt-all[b].queuedAt);
       if(!ready.length) break;
       const id=ready[0], item=all[id], sentV=item.v;
@@ -937,8 +974,13 @@ async function pendingDrain(force){
         _pend.lastErr=String((e && e.message) || e);
         const cur=_pendRead();
         if(cur[id]){
-          cur[id].tries=(cur[id].tries||0)+1;
-          cur[id].nextTry=Date.now()+Math.min(60000, 5000*Math.pow(2, cur[id].tries-1));
+          if(/DATE_LOCKED/.test(String((e && e.raw) || ''))){
+            // سرور نے تاریخ کی وجہ سے انکار کیا — بار بار کوشش بے فائدہ؛ ایڈمن کی اجازت کے بعد "دوبارہ کوشش" سے بھیجیں
+            cur[id].blocked=true; cur[id].blockedMsg=String(e.raw).substring(0,200);
+          } else {
+            cur[id].tries=(cur[id].tries||0)+1;
+            cur[id].nextTry=Date.now()+Math.min(60000, 5000*Math.pow(2, cur[id].tries-1));
+          }
           _pendWrite(cur);
         }
       }
@@ -948,7 +990,7 @@ async function pendingDrain(force){
     _pend.draining=false;
     _pendRelease();
     const left=_pendRead();
-    const ids=Object.keys(left);
+    const ids=Object.keys(left).filter(i=>!left[i].blocked);
     if(ids.length){
       const next=Math.min.apply(null, ids.map(i=>left[i].nextTry||0));
       _pendSchedule(Math.max(1000, next-Date.now()));
@@ -962,7 +1004,9 @@ async function flushPendingSaves(code, maxMs){
   if(!pendingCount(code)) return true;
   toast('پہلے آخری سفر محفوظ ہو رہا ہے، چند سیکنڈ انتظار کریں...');
   const t0=Date.now();
+  const onlyBlocked=()=>{ const a=_pendRead(); const ids=Object.keys(a).filter(id=>!code||id.indexOf(code+'_')===0); return ids.length>0 && ids.every(id=>a[id].blocked); };
   while(pendingCount(code) && Date.now()-t0<maxMs){
+    if(onlyBlocked()) break;
     pendingDrain(true);
     await new Promise(r=>setTimeout(r,800));
   }
@@ -978,6 +1022,7 @@ function updatePendingUi(){
       const el=document.getElementById('pend-'+id.substring(id.indexOf('_')+1));
       if(!el) return;
       const bad=(all[id].tries||0)>0;
+      if(all[id].blocked){ el.innerHTML='<div class="edit-badge" style="color:#8B2E2E;">⛔ تاریخ کی اجازت نہیں — محفوظ نہیں ہوا</div>'; return; }
       el.innerHTML = bad
         ? '<div class="edit-badge" style="color:#8B2E2E;">⚠️ محفوظ نہیں ہوا — دوبارہ کوشش ہو رہی ہے</div>'
         : '<div class="edit-badge" style="color:#8a5a00;">⏳ سرور پر محفوظ ہو رہا ہے…</div>';
@@ -997,16 +1042,35 @@ function updatePendingUi(){
     return;
   }
   _pend.hadItems=true;
+  const blockedIds=ids.filter(i=>all[i].blocked);
   const failing=ids.some(i=>(all[i].tries||0)>0);
   if(!bar){ bar=document.createElement('div'); bar.id='pendBar'; document.body.appendChild(bar); }
   bar.dataset.done='';
   bar.style.cssText='position:fixed;left:8px;right:8px;bottom:8px;z-index:99999;padding:10px 12px;border-radius:10px;font-size:13px;text-align:center;'+
     (failing ? 'background:#fde3e3;color:#8B2E2E;border:1px solid #8B2E2E;' : 'background:#fff3cd;color:#8a5a00;border:1px solid #8a5a00;');
+  if(blockedIds.length){
+    bar.style.cssText='position:fixed;left:8px;right:8px;bottom:8px;z-index:99999;padding:10px 12px;border-radius:10px;font-size:13px;text-align:center;background:#fde3e3;color:#8B2E2E;border:1px solid #8B2E2E;';
+    bar.innerHTML='⛔ '+blockedIds.length+' سفر محفوظ نہیں ہو سکا — اس تاریخ کی اجازت نہیں (آج سمیت صرف پچھلے 2 دن)۔ ایڈمن سے اجازت لے کر "دوبارہ کوشش" دبائیں، یا نہ چاہیے تو "ہٹا دیں"۔ <div style="margin-top:6px;"><button id="pendRetryBlockedBtn" style="padding:4px 10px;margin:0 4px;">دوبارہ کوشش</button><button id="pendDiscardBlockedBtn" style="padding:4px 10px;margin:0 4px;">ہٹا دیں</button></div>';
+    document.getElementById('pendRetryBlockedBtn').onclick=pendingRetryBlocked;
+    document.getElementById('pendDiscardBlockedBtn').onclick=pendingDiscardBlocked;
+    return;
+  }
   bar.innerHTML = (failing
     ? '⚠️ '+ids.length+' سفر ابھی تک سرور پر محفوظ نہیں ہوا (انٹرنیٹ/سرور) — خود دوبارہ کوشش ہو رہی ہے۔ صفحہ بند نہ کریں۔ <button id="pendRetryBtn" style="margin-top:6px;padding:4px 10px;">ابھی دوبارہ کوشش</button>'
     : '⏳ '+ids.length+' سفر سرور پر محفوظ ہو رہا ہے — صفحہ بند نہ کریں');
   const btn=document.getElementById('pendRetryBtn');
   if(btn) btn.onclick=()=>pendingDrain(true);
+}
+function pendingRetryBlocked(){
+  const all=_pendRead();
+  Object.keys(all).forEach(id=>{ if(all[id].blocked){ delete all[id].blocked; delete all[id].blockedMsg; all[id].tries=0; all[id].nextTry=0; } });
+  _pendWrite(all); updatePendingUi(); pendingDrain(true);
+}
+function pendingDiscardBlocked(){
+  if(!confirm('یہ محفوظ نہ ہو سکنے والے سفر ہمیشہ کے لیے ہٹا دیے جائیں گے۔ کیا آپ کو یقین ہے؟')) return;
+  const all=_pendRead();
+  Object.keys(all).forEach(id=>{ if(all[id].blocked) delete all[id]; });
+  _pendWrite(all); updatePendingUi();
 }
 function initPendingSaves(){
   window.addEventListener('beforeunload', e=>{
@@ -1184,6 +1248,23 @@ function fmtNum(n){ return (Math.round((n||0)*100)/100).toLocaleString('en-US');
 function fmtNumRound(n){ return Math.round(n||0).toLocaleString('en-US'); }
 // کلومیٹر: floating-point کے فالتو ہندسے ہٹا کر زیادہ سے زیادہ 2 اعشاریہ (مثلاً 39.100000000000364 → 39.1)
 function roundKm(n){ const x=parseFloat(n); return isFinite(x) ? Math.round(x*100)/100 : 0; }
+// ===== یومیہ لاگ کی تاریخ کی حد =====
+// ذمہ دار اپنے یومیہ اندراج میں صرف آج سمیت پچھلے 2 دن لکھ سکتا ہے۔ پرانی تاریخ کے لیے ایڈمن کی اجازت (permits) درکار ہے۔
+// کسی اور (ایڈمن/چیک کرنے والے) کا ریکارڈ کھول کر ترمیم پر یہ حد نہیں لگتی۔
+const ENTRY_BACK_DAYS = 2;
+function addDaysStr(dateStr, n){ const d=parseLocalDate(dateStr); d.setDate(d.getDate()+n); return localDateStr(d); }
+function isOwnerWindowRestricted(){ return !!(currentUser && currentUser.role!=='admin' && !viewingCode); }
+async function getMyPermit(){ try{ return await fsGetCached('permits', currentUser.code); }catch(e){ return null; } }
+function entryWindowFor(permit){
+  const today = localDateStr(new Date());
+  let min = addDaysStr(today, -ENTRY_BACK_DAYS);
+  let active = false;
+  if(permit && permit.from && permit.until && Date.now() < Date.parse(permit.until)){ active = true; if(permit.from < min) min = permit.from; }
+  return { min, max:today, active, permit: active ? permit : null };
+}
+function dateInWindow(dateStr, w){ return dateStr>=w.min && dateStr<=w.max; }
+function fmtPermitUntil(iso){ return new Date(iso).toLocaleString('en-GB',{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'}); }
+function permitRemainingText(iso){ const ms=Date.parse(iso)-Date.now(); if(ms<=0) return 'ختم'; const h=Math.floor(ms/3600000), m=Math.floor((ms%3600000)/60000); return (h?h+' گھنٹے ':'')+m+' منٹ'; }
 
 let currentUser=null;
 let currentSlabs=[];
@@ -1274,10 +1355,10 @@ function resetAddUserForm(){
   onRegRoleChange();
 }
 /* ---------------- session persistence (survives page refresh / mobile background-reload) ---------------- */
-const SESSION_KEY='safri_session_v1';
-const SESSION_START_KEY='safri_session_start_v1';
+const SESSION_KEY=ENV_PREFIX+'session_v1';
+const SESSION_START_KEY=ENV_PREFIX+'session_start_v1';
 const SESSION_MAX_AGE_MS = 12*60*60*1000; // 12 hours — after this, the app requires logging in again
-const LAST_TAB_KEY='safri_last_tab_v1';
+const LAST_TAB_KEY=ENV_PREFIX+'last_tab_v1';
 // FIX: poora user object (jis mein PIN bhi shamil hota tha) pehle localStorage mein
 // plaintext save hota tha — koi bhi jo device tak access rakhta ho (ya XSS ke zariye) PIN
 // parh sakta tha. Session restore beshak server se hamesha "fresh" record dobara mangwata
@@ -1455,6 +1536,7 @@ async function enterApp(landingTab){
   document.getElementById('tabVerified').classList.toggle('hidden', hasNoSubs);
   document.getElementById('tabAddUser').classList.toggle('hidden', currentUser.role!=='admin');
   document.getElementById('tabAssignSup').classList.toggle('hidden', currentUser.role!=='admin');
+  document.getElementById('tabPermits').classList.toggle('hidden', currentUser.role!=='admin');
   document.getElementById('tabReports').classList.toggle('hidden', !['admin','district','district_office','supervisor'].includes(currentUser.role||'box'));
   try{
     await Promise.all([ loadProfileIntoForm(), loadSlabsIntoForm(), refreshOrgNameLabel() ]);
@@ -1610,6 +1692,185 @@ async function saveAssignedBoxes(){
    کرتا ہے — دونوں ہمیشہ ہم آہنگ (in sync) رہتے ہیں۔ Naya faida: ek jagah se poore district ka jaiza,
    aur ek baar kisi supervisor ko assign ho jane wale box zimedar ko doosre supervisor ke liye
    khud-ba-khud "locked" dikhata hai jab tak pehle un-assign na ho. */
+// ===== ایڈمن: پچھلی تاریخ کی اجازت =====
+let permitChosenUser = null;
+function permitMonthBounds(){
+  const today = localDateStr(new Date());
+  const t = parseLocalDate(today);
+  return { today, firstPrev: localDateStr(new Date(t.getFullYear(), t.getMonth()-1, 1)) };
+}
+async function initPermitsTab(){
+  if(currentUser.role!=='admin') return;
+  permitChosenUser = null;
+  document.getElementById('permitScope').value='one'; onPermitScopeChange();
+  document.getElementById('permitChosen').classList.add('hidden');
+  document.getElementById('permitSearchBox').value = '';
+  document.getElementById('permitSearchResults').innerHTML = '';
+  const b = permitMonthBounds();
+  const f = document.getElementById('permitFrom');
+  f.min = b.firstPrev; f.max = b.today;
+  if(!f.value || f.value<b.firstPrev || f.value>b.today) f.value = addDaysStr(b.today, -3);
+  // صرف TEST پورٹل: خود بند ہونے کی جانچ کے لیے 10 منٹ کا آپشن (اصلی پورٹل میں نہیں آتا)
+  if(APP_ENV==='test' && !document.getElementById('permitTestOpt')){
+    const o=document.createElement('option'); o.id='permitTestOpt'; o.value='0.1667'; o.textContent='10 منٹ (صرف TEST)';
+    document.getElementById('permitHours').prepend(o);
+  }
+  await renderPermitList();
+}
+async function filterPermitUsers(){
+  const q = document.getElementById('permitSearchBox').value.trim().toLowerCase();
+  const box = document.getElementById('permitSearchResults');
+  if(!q){ box.innerHTML=''; return; }
+  const all = (await getAllUsers()).filter(u=>u.role!=='admin' && u.status!=='closed');
+  const matches = all.filter(u=> (u.name||'').toLowerCase().includes(q) || (u.code||'').toLowerCase().includes(q)).slice(0,20);
+  if(!matches.length){ box.innerHTML='<div class="empty">کوئی ذمہ دار نہیں ملا</div>'; return; }
+  box.innerHTML = matches.map(u=>`<div class="sub-row" onclick="selectPermitUser('${escapeHtml(u.code)}')"><div><b>${escapeHtml(u.name)}</b><div class="role-tag">${ROLE_LABELS[u.role]||u.role} (${escapeHtml(u.code)})</div></div><div class="darrow">›</div></div>`).join('');
+}
+async function selectPermitUser(code){
+  const u = (await getAllUsers()).find(x=>String(x.code)===String(code));
+  if(!u) return;
+  permitChosenUser = u;
+  document.getElementById('permitSearchResults').innerHTML = '';
+  document.getElementById('permitSearchBox').value = '';
+  const c = document.getElementById('permitChosen');
+  c.innerHTML = `منتخب ذمہ دار: <b>${escapeHtml(u.name)}</b> (${escapeHtml(u.code)}) — ${ROLE_LABELS[u.role]||u.role}`;
+  c.classList.remove('hidden');
+}
+// ----- کتنے لوگوں کو اجازت: ایک / ضلع / ڈویژن -----
+function permitEligibleUsers(all){
+  return all.filter(u=>u && u.code && u.role!=='admin' && u.role!=='finance' && u.status!=='closed');
+}
+async function onPermitScopeChange(){
+  const scope=document.getElementById('permitScope').value;
+  document.getElementById('permitOneBox').classList.toggle('hidden', scope!=='one');
+  document.getElementById('permitGroupBox').classList.toggle('hidden', scope==='one');
+  if(scope==='one'){ return; }
+  const users=permitEligibleUsers(await getAllUsers());
+  const sel=document.getElementById('permitGroupSel');
+  let names=[];
+  if(scope==='district'){
+    document.getElementById('permitGroupLabel').textContent='ضلع منتخب کریں';
+    const set={};
+    users.forEach(u=>{ const ds=(u.districts&&u.districts.length)?u.districts:(u.district?[u.district]:[]); ds.forEach(d=>{ if(d) set[normLoc(d)]=d; }); });
+    names=Object.keys(set).map(k=>({v:k,t:set[k]}));
+  } else {
+    document.getElementById('permitGroupLabel').textContent='ڈویژن منتخب کریں';
+    const set={};
+    users.forEach(u=>{ if(u.division) set[normLoc(u.division)]=u.division; });
+    names=Object.keys(set).map(k=>({v:k,t:set[k]}));
+  }
+  names.sort((a,b)=>a.t.localeCompare(b.t,'ur'));
+  sel.innerHTML='<option value="">— منتخب کریں —</option>'+names.map(n=>`<option value="${escapeHtml(n.v)}">${escapeHtml(n.t)}</option>`).join('');
+  document.getElementById('permitGroupInfo').textContent='';
+}
+async function permitGroupMembers(){
+  const scope=document.getElementById('permitScope').value;
+  const key=document.getElementById('permitGroupSel').value;
+  if(!key) return [];
+  const users=permitEligibleUsers(await getAllUsers());
+  if(scope==='district') return users.filter(u=>{ const ds=(u.districts&&u.districts.length)?u.districts:(u.district?[u.district]:[]); return ds.some(d=>normLoc(d)===key); });
+  return users.filter(u=>normLoc(u.division)===key);
+}
+async function updatePermitGroupInfo(){
+  const box=document.getElementById('permitGroupInfo');
+  const m=await permitGroupMembers();
+  if(!document.getElementById('permitGroupSel').value){ box.textContent=''; return; }
+  const by={}; m.forEach(u=>{ const r=ROLE_LABELS[u.role]||u.role; by[r]=(by[r]||0)+1; });
+  box.innerHTML = m.length ? `کل <b>${m.length}</b> ذمہ داران کو اجازت ملے گی: `+Object.keys(by).map(r=>`${escapeHtml(r)} ${by[r]}`).join('، ') : 'اس میں کوئی ذمہ دار نہیں ملا';
+}
+
+async function grantPermit(){
+  if(currentUser.role!=='admin'){ toast('یہ صرف ایڈمن کے لیے ہے'); return; }
+  const scope=document.getElementById('permitScope').value;
+  const from = document.getElementById('permitFrom').value;
+  const hoursSel = document.getElementById('permitHours');
+  const hours = parseFloat(hoursSel.value);
+  const hoursLabel = hoursSel.options[hoursSel.selectedIndex].text;
+  const b = permitMonthBounds();
+  if(!from || from<b.firstPrev || from>b.today){ toast('تاریخ موجودہ یا پچھلے مہینے کی ہو اور آج سے آگے نہ ہو'); return; }
+  if(!(hours>0 && hours<=48)){ toast('مدت درست منتخب کریں'); return; }
+  const nowIso = new Date().toISOString();
+  const until = new Date(Date.now()+hours*3600000).toISOString();
+  const grantedBy = {code: currentUser.code, name: currentUser.name};
+
+  if(scope==='one'){
+    if(!permitChosenUser){ toast('پہلے ذمہ دار منتخب کریں'); return; }
+    const code = String(permitChosenUser.code);
+    const rec = { code, name: permitChosenUser.name, from, hours, until, grantedBy, grantedAt: nowIso };
+    const ok = await fsSet('permits', code, rec);
+    if(ok){
+      toast(`${permitChosenUser.name} کو ${from} سے آج تک کی اجازت مل گئی (${hoursLabel}) ✓`);
+      permitChosenUser = null;
+      document.getElementById('permitChosen').classList.add('hidden');
+      await renderPermitList();
+    }
+    return;
+  }
+
+  // ضلع / ڈویژن: سب کو ایک ہی بار میں
+  const members = await permitGroupMembers();
+  if(!document.getElementById('permitGroupSel').value){ toast(scope==='district'?'پہلے ضلع منتخب کریں':'پہلے ڈویژن منتخب کریں'); return; }
+  if(!members.length){ toast('اس میں کوئی ذمہ دار نہیں ملا'); return; }
+  const sel=document.getElementById('permitGroupSel');
+  const label=(scope==='district'?'ضلع ':'ڈویژن ')+sel.options[sel.selectedIndex].text;
+  if(!confirm(`${label}: کل ${members.length} ذمہ داران کو ${from} سے آج تک کی اجازت (${hoursLabel}) دی جائے؟`)) return;
+  const batch = { id:'b'+Date.now(), label, scope };
+  const body = {};
+  members.forEach(u=>{ const code=String(u.code); body[code]={ code, name:u.name, from, hours, until, grantedBy, grantedAt:nowIso, batch }; });
+  try{
+    await _apiCall('bulk-set', {col:'permits'}, body);
+    _fsInvalidate('permits');
+    toast(`${label}: ${members.length} ذمہ داران کو اجازت مل گئی (${hoursLabel}) ✓`);
+    await renderPermitList();
+  }catch(e){
+    console.error(e);
+    toast('اجازت نہیں لگ سکی: '+String((e&&(e.raw||e.message))||e).substring(0,120));
+  }
+}
+async function renderPermitList(){
+  const box = document.getElementById('permitList');
+  box.innerHTML = '<div class="empty">لوڈ ہو رہا ہے...</div>';
+  const list = (await fsListAll('permits')) || [];
+  const now = Date.now();
+  const active = list.filter(p=>p && p.until && Date.parse(p.until)>now).sort((a,b)=>Date.parse(a.until)-Date.parse(b.until));
+  document.getElementById('permitRevokeAllBox').classList.toggle('hidden', active.length<2);
+  if(!active.length){ box.innerHTML = '<div class="empty">اس وقت کسی کو اجازت نہیں دی گئی</div>'; return; }
+  const groups={}, singles=[];
+  active.forEach(p=>{ if(p.batch && p.batch.id){ (groups[p.batch.id]=groups[p.batch.id]||[]).push(p); } else singles.push(p); });
+  let html='';
+  Object.keys(groups).forEach(id=>{
+    const g=groups[id], p0=g[0];
+    html+=`<div class="sub-row" style="cursor:default;background:#eef6ee;"><div><b>👥 ${escapeHtml(p0.batch.label||'گروپ')}</b> — ${g.length} ذمہ داران<div class="role-tag">${escapeHtml(p0.from)} سے آج تک · ${fmtPermitUntil(p0.until)} تک · باقی: ${permitRemainingText(p0.until)}</div></div><button class="btn-ghost btn-sm" onclick="revokePermitBatch('${escapeHtml(id)}')">سب ختم کریں</button></div>`;
+  });
+  html+=singles.map(p=>`<div class="sub-row" style="cursor:default;"><div><b>${escapeHtml(p.name||'')}</b> (${escapeHtml(p.code||'')})<div class="role-tag">${escapeHtml(p.from)} سے آج تک · ${fmtPermitUntil(p.until)} تک · باقی: ${permitRemainingText(p.until)}</div></div><button class="btn-ghost btn-sm" onclick="revokePermit('${escapeHtml(p.code)}')">ختم کریں</button></div>`).join('');
+  box.innerHTML = html;
+}
+async function revokePermit(code){
+  if(currentUser.role!=='admin') return;
+  if(!confirm('کیا اس ذمہ دار کی اجازت ابھی ختم کر دی جائے؟')) return;
+  const ok = await fsDelete('permits', String(code));
+  if(ok){ toast('اجازت ختم کر دی گئی ✓'); await renderPermitList(); } else toast('اجازت ختم کرنے میں خرابی');
+}
+// کئی اجازتیں ایک ساتھ ختم: record حذف کرنے کی بجائے until ابھی کا کر دیتے ہیں (ایک ہی کال میں)
+async function expirePermits(filterFn, msg){
+  const list=(await fsListAll('permits'))||[];
+  const now=Date.now(), nowIso=new Date().toISOString();
+  const body={}; let n=0;
+  list.forEach(p=>{ if(p && p.code && p.until && Date.parse(p.until)>now && filterFn(p)){ body[String(p.code)]=Object.assign({},p,{until:nowIso}); n++; } });
+  if(!n){ toast('کوئی فعال اجازت نہیں ملی'); return; }
+  try{ await _apiCall('bulk-set',{col:'permits'},body); _fsInvalidate('permits'); toast(`${n} ${msg} ✓`); await renderPermitList(); }
+  catch(e){ console.error(e); toast('اجازتیں ختم نہیں ہو سکیں'); }
+}
+async function revokePermitBatch(id){
+  if(currentUser.role!=='admin') return;
+  if(!confirm('اس گروپ کی تمام اجازتیں ابھی ختم کر دی جائیں؟')) return;
+  await expirePermits(p=>p.batch&&p.batch.id===id,'اجازتیں ختم کر دی گئیں');
+}
+async function revokeAllPermits(){
+  if(currentUser.role!=='admin') return;
+  if(!confirm('تمام فعال اجازتیں ابھی ختم کر دی جائیں؟')) return;
+  await expirePermits(()=>true,'اجازتیں ختم کر دی گئیں');
+}
 async function initAssignSupTab(){
   const all = await getAllUsers();
   const rawDistricts = [...new Set(all.flatMap(u=> (Array.isArray(u.districts)&&u.districts.length)?u.districts:(u.district?[u.district]:[]) ))].filter(Boolean).sort();
@@ -1876,6 +2137,7 @@ async function saveProfileData(){
       document.getElementById('tabVerified').classList.toggle('hidden', hasNoSubs);
       document.getElementById('tabAddUser').classList.toggle('hidden', currentUser.role!=='admin');
       document.getElementById('tabAssignSup').classList.toggle('hidden', currentUser.role!=='admin');
+      document.getElementById('tabPermits').classList.toggle('hidden', currentUser.role!=='admin');
       document.getElementById('tabReports').classList.toggle('hidden', !['admin','district','district_office','supervisor'].includes(currentUser.role||'box'));
     }
     if(viewingUserObj && viewingUserObj.code===code){
@@ -2179,7 +2441,7 @@ function showAppTab(which){
   const adminOwn = isAdminOwnView();
   ['tabDaily','tabPdf'].forEach(id=>{ const el=document.getElementById(id); if(el) el.classList.toggle('hidden', adminOwn); });
   if(adminOwn && (which==='daily' || which==='pdf')) which='dashboard';
-  ['Dashboard','Profile','Petrol','Daily','Sub','Submitted','Verified','AddUser','AssignSup','Reports','Pdf'].forEach(t=>{
+  ['Dashboard','Profile','Petrol','Daily','Sub','Submitted','Verified','AddUser','AssignSup','Permits','Reports','Pdf'].forEach(t=>{
     const el=document.getElementById('tab'+t);
     if(el) el.classList.toggle('active', t.toLowerCase()===which);
   });
@@ -2192,6 +2454,7 @@ function showAppTab(which){
   document.getElementById('verifiedTab').classList.toggle('hidden', which!=='verified');
   document.getElementById('addUserTab').classList.toggle('hidden', which!=='adduser');
   document.getElementById('assignSupTab').classList.toggle('hidden', which!=='assignsup');
+  document.getElementById('permitsTab').classList.toggle('hidden', which!=='permits');
   document.getElementById('reportsTab').classList.toggle('hidden', which!=='reports');
   document.getElementById('dangerZoneCard').classList.toggle('hidden', which!=='adduser');
   document.getElementById('pdfTab').classList.toggle('hidden', which!=='pdf');
@@ -2224,6 +2487,7 @@ function showAppTab(which){
   }
   if(which==='adduser'){ resetAddUserForm(); populateLocationDatalists(); }
   if(which==='assignsup'){ initAssignSupTab(); }
+  if(which==='permits'){ initPermitsTab(); }
   updateSubmittedBadgeCount();
   saveLastTab(which);
 }
@@ -2830,7 +3094,9 @@ async function getMonthEntryMap(){
 async function renderDaysList(){
   const profile=getProfileFromForm();
   document.getElementById('daysList').innerHTML='<div class="empty">لوڈ ہو رہا ہے...</div>';
-  const map=await getMonthEntryMap();
+  const restricted = isOwnerWindowRestricted();
+  const [map, myPermit] = await Promise.all([getMonthEntryMap(), restricted ? getMyPermit() : Promise.resolve(null)]);
+  const win = restricted ? entryWindowFor(myPermit) : null;
   const daysInMonth=new Date(profile.year, profile.month+1, 0).getDate();
   const defaultRate=parseFloat(document.getElementById('pDefaultRate').value)||0;
 
@@ -2841,6 +3107,7 @@ async function renderDaysList(){
     const dateStr=localDateStr(dateObj);
     const dayName=urduDays[dateObj.getDay()];
     const e=map[dateStr];
+    const dLocked = !!(win && !dateInWindow(dateStr, win));
     const filled=!!(e&&(e.travel||e.activity||e.km||e.fare));
     let maintenance=0;
     if(filled){
@@ -2856,13 +3123,14 @@ async function renderDaysList(){
     const editBadge = (e && e.editedBy) ? `<div class="edit-badge">✏️ ترمیم: ${escapeHtml(e.editedBy.name)} (${ROLE_LABELS[e.editedBy.role]||e.editedBy.role})</div>` : '';
     const remarkBadge = (e && e.remarks && e.remarks.length) ? `<div class="edit-badge" style="color:#254A40;">💬 ${e.remarks.length} ریمارک/جواب</div>` : '';
     rowsHtml.push(`
-      <div class="day-row ${filled?'filled':'empty-day'} ${e&&e.editedBy?'was-edited':''}" onclick="toggleDayEditor('${dateStr}')">
-        <div class="dinfo"><b>${dateStr} — ${dayName}</b><div class="dsum">${escapeHtml(detailLine)}</div>${editBadge}${remarkBadge}<span class="pend-slot" id="pend-${dateStr}"></span></div>
+      <div class="day-row ${filled?'filled':'empty-day'} ${e&&e.editedBy?'was-edited':''} ${dLocked?'date-locked':''}" onclick="toggleDayEditor('${dateStr}')">
+        <div class="dinfo"><b>${dLocked?'🔒 ':''}${dateStr} — ${dayName}</b><div class="dsum">${escapeHtml(detailLine)}</div>${editBadge}${remarkBadge}<span class="pend-slot" id="pend-${dateStr}"></span></div>
         <div class="darrow">›</div>
       </div>
       <div class="day-editor-slot" id="slot-${dateStr}"></div>`);
   }
-  document.getElementById('daysList').innerHTML = rowsHtml.join('');
+  const winNote = win ? `<div class="note" style="margin-bottom:10px;">📅 آپ آج سمیت پچھلے ${ENTRY_BACK_DAYS} دن (${win.min} سے ${win.max} تک) کا اندراج کر سکتے ہیں۔ اس سے پرانی تاریخ (🔒) کے لیے ایڈمن سے اجازت لیں۔${win.active ? `<br>✅ <b>ایڈمن کی اجازت فعال:</b> ${win.permit.from} سے آج تک، ${fmtPermitUntil(win.permit.until)} تک (باقی: ${permitRemainingText(win.permit.until)})` : ''}</div>` : '';
+  document.getElementById('daysList').innerHTML = winNote + rowsHtml.join('');
   const monthlyDeduction = parseFloat(document.getElementById('pDeductionMonthly').value)||0;
   document.getElementById('sumKm').textContent=fmtNum(totalKm);
   document.getElementById('sumFare').textContent=fmtNum(totalFare);
@@ -3536,6 +3804,7 @@ async function renderDashboard(){
         <div class="dash-action" onclick="showAppTab('submitted')"><span class="ic">📥</span>جمع شدہ</div>
         <div class="dash-action" onclick="showAppTab('verified')"><span class="ic">✅</span>تصدیق شدہ</div>
         <div class="dash-action" onclick="showAppTab('reports')"><span class="ic">📊</span>رپورٹس</div>
+        <div class="dash-action" onclick="showAppTab('permits')"><span class="ic">📅</span>پچھلی تاریخ کی اجازت</div>
         <div class="dash-action" onclick="showAppTab('petrol')"><span class="ic">⛽</span>پٹرول ریٹس</div>
         <div class="dash-action" onclick="showAppTab('profile')"><span class="ic">👤</span>پروفائل اپڈیٹ کریں</div>
       </div>`;
@@ -3595,7 +3864,11 @@ async function openDayEditor(dateStr){
   if(!slot) return;
   slot.innerHTML='<div class="editor"><div class="empty">لوڈ ہو رہا ہے...</div></div>';
   let e={date:dateStr, travel:'', travelFrom:'', travelTo:'', activity:'', meterStart:'', meterEnd:'', km:'', fare:''};
-  const [res, locked] = await Promise.all([ fsGetEntryFull(entryDocId(dateStr)), isMonthLockedForOwner() ]);
+  const restrictedNow = isOwnerWindowRestricted();
+  const [res, monthLocked, myPermit] = await Promise.all([ fsGetEntryFull(entryDocId(dateStr)), isMonthLockedForOwner(), restrictedNow ? getMyPermit() : Promise.resolve(null) ]);
+  const win = restrictedNow ? entryWindowFor(myPermit) : null;
+  const dateLocked = !!(win && !dateInWindow(dateStr, win));
+  const locked = monthLocked || dateLocked;
   openDayLocked=locked; openDayLockedAt=Date.now();
   const pendItem = _pendRead()[entryDocId(dateStr)];
   if(pendItem){ e = Object.assign({}, res||e, pendItem.entry); } // abhi server tak na pahunchi hui entry ko upar rakhein
@@ -3604,7 +3877,8 @@ async function openDayEditor(dateStr){
   originalDayPhotos={start:currentDayPhotos.start, end:currentDayPhotos.end};
   const d=parseLocalDate(dateStr); const dayName=urduDays[d.getDay()];
   const editFlag = e.editedBy ? `<div class="edit-flag">✏️ اس اندراج میں آخری ترمیم: <b>${escapeHtml(e.editedBy.name)}</b> (${ROLE_LABELS[e.editedBy.role]||e.editedBy.role})</div>` : '';
-  const lockNote = locked ? `<div class="warn-note">🔒 یہ مہینہ جمع کروایا جا چکا ہے — آپ خود ترمیم نہیں کر سکتے۔ نیچے ریمارکس میں پیغام بھیجا جا سکتا ہے۔</div>` : '';
+  const lockNote = monthLocked ? `<div class="warn-note">🔒 یہ مہینہ جمع کروایا جا چکا ہے — آپ خود ترمیم نہیں کر سکتے۔ نیچے ریمارکس میں پیغام بھیجا جا سکتا ہے۔</div>`
+    : (dateLocked ? `<div class="warn-note">🔒 اس تاریخ کا اندراج بند ہے — آپ آج سمیت صرف پچھلے ${ENTRY_BACK_DAYS} دن (${win.min} سے ${win.max}) کا اندراج کر سکتے ہیں۔ پرانی تاریخ کے لیے ایڈمن سے اجازت لیں۔ نیچے ریمارکس میں پیغام بھیجا جا سکتا ہے۔</div>` : '');
   const dis = locked ? 'disabled' : '';
   const remarkCount = (e.remarks && e.remarks.length) || 0;
   const remarksHtml = remarkCount
@@ -3750,7 +4024,11 @@ async function saveDayEntry(){
   if(isAdminOwnView()){ toast('ایڈمن آئی ڈی پر ماہانہ ریکارڈ درج نہیں ہو سکتا — یہ صرف چیک اور اپڈیٹ کے لیے ہے'); return; }
   if(!openDayDate) return;
   const lockedNow = (openDayLockedAt && (Date.now()-openDayLockedAt)<120000) ? openDayLocked : await isMonthLockedForOwner();
-  if(lockedNow){ toast('یہ مہینہ جمع کروایا جا چکا ہے، ترمیم ممکن نہیں'); return; }
+  if(lockedNow){ toast('اس اندراج میں ترمیم ممکن نہیں (مہینہ جمع ہو چکا یا تاریخ کی اجازت نہیں)'); return; }
+  if(isOwnerWindowRestricted()){
+    const w = entryWindowFor(await getMyPermit());
+    if(!dateInWindow(openDayDate, w)){ toast('اس تاریخ کا اندراج بند ہے — پرانی تاریخ کے لیے ایڈمن سے اجازت لیں'); return; }
+  }
   if(pendingPhotoUploads.start || pendingPhotoUploads.end){
     toast('تصویر اپلوڈ مکمل ہونے کا انتظار ہو رہا ہے...');
     await Promise.all([pendingPhotoUploads.start, pendingPhotoUploads.end]);
@@ -3774,7 +4052,7 @@ async function saveDayEntry(){
     // remarks yahan nahi bheji jatin — server purani remarks jas ki tas rakhta hai (is se save ka ek round bach jata hai)
   };
   if(viewingCode && viewingCode!==currentUser.code){
-    entry.editedBy={name:currentUser.name, role:currentUser.role||'box'};
+    entry.editedBy={code:currentUser.code, name:currentUser.name, role:currentUser.role||'box'};
     entry.editedAt=new Date().toISOString();
   }
   const entryId = entryDocId(openDayDate);
@@ -4607,7 +4885,7 @@ Object.assign(window, {
   openDayEditor, toggleDayEditor, onMeterChange, closeDayEditor, saveDayEntry, addRemark,
   changeOwnPin, resetSubordinatePin, toggleAccountStatus, editOrgName, approveCurrentStage, sendBackCurrentStage, submitMonth, filterSubList,
   generateAndDownloadPdf, shareWhatsApp, renderDaysList, populateLocationDatalists,
-  onAdminPickRoleChange, onAdminPickUserChange, backToOwnFromPicker, toggleSelectAllSub, bulkLockProfiles, confirmMailedToFinance, adminClearMonthEntries, renderDistrictReport, onReportGroupChange, migrateOldSubmittedStages, verifyMemberProfile, adminDeletePhotos, switchDoProfileMode, filterDoProfileList, selectDoProfile, filterAdminSearchList, selectAdminSearchResult, markSentToBank,
+  onAdminPickRoleChange, onAdminPickUserChange, backToOwnFromPicker, toggleSelectAllSub, bulkLockProfiles, confirmMailedToFinance, adminClearMonthEntries, renderDistrictReport, onReportGroupChange, initPermitsTab, filterPermitUsers, selectPermitUser, grantPermit, revokePermit, onPermitScopeChange, updatePermitGroupInfo, revokePermitBatch, revokeAllPermits, migrateOldSubmittedStages, verifyMemberProfile, adminDeletePhotos, switchDoProfileMode, filterDoProfileList, selectDoProfile, filterAdminSearchList, selectAdminSearchResult, markSentToBank,
   renderSubmittedList, renderVerifiedList,
   initAssignSupTab, onAssignDistrictChange, onAssignSupervisorChange, saveDistrictAssignments, unassignBoxDirect,
   renderDashboard, handleMeterPhotoUpload, toggleDayRemarks, viewMeterPhotoFull
