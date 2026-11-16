@@ -147,6 +147,7 @@
 </style>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
 </head>
 <body>
 <div id="bootLoadingOverlay" style="position:fixed;inset:0;background:#EEF1EC;z-index:999999;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;">
@@ -261,6 +262,7 @@
           </select>
         </div>
         <button class="btn-primary btn-sm" onclick="renderDistrictReport()">📊 رپورٹ دیکھیں</button>
+        <button class="btn-primary btn-sm" id="reportJpgBtn" style="background:#6b4e9b;" onclick="downloadReportJpg()">🖼️ رپورٹ JPG میں ڈاؤن لوڈ کریں</button>
         <div id="distReportBody" style="margin-top:12px;"></div>
         <div class="note hidden" id="distReportMigrateWrap" style="margin-top:16px;border:1px dashed var(--gold);padding:8px;">
           نظام میں تبدیلیاں (نئی تنظیمی ترتیب) پرانے جمع شدہ ریکارڈز پر خودکار لاگو نہیں ہوتیں — یہ بٹن پرانے، ابھی تک زیر غور (نامکمل) ریکارڈز کو نئے سسٹم کے مطابق درست چیکر کے پاس بھیج دے گا۔
@@ -4849,6 +4851,56 @@ async function bulkDownloadVerifiedJpg(){
   }catch(err){ console.error(err); noteEl.textContent='JPG/ZIP نہیں بن سکی، دوبارہ کوشش کریں'; }
 }
 
+/* ---------------- رپورٹس ٹیب: رپورٹ کو JPG تصویر میں ڈاؤن لوڈ ---------------- */
+async function downloadReportJpg(){
+  const src=document.getElementById('distReportBody');
+  if(!src || !src.textContent.trim() || src.querySelector('.empty')){ toast('پہلے "رپورٹ دیکھیں" دبا کر رپورٹ کھولیں'); return; }
+  if(typeof html2canvas==='undefined'){ toast('تصویر بنانے کا ٹول لوڈ نہیں ہوا، انٹرنیٹ چیک کر کے صفحہ ریفریش کریں'); return; }
+  const btn=document.getElementById('reportJpgBtn');
+  const oldTxt=btn?btn.textContent:'';
+  if(btn){ btn.disabled=true; btn.textContent='تصویر بن رہی ہے...'; }
+  const wrap=document.createElement('div');
+  try{
+    const mIdx=parseInt(document.getElementById('distReportMonth').value)||0;
+    const year=parseInt(document.getElementById('distReportYear').value)||new Date().getFullYear();
+    const typeSel=document.getElementById('distReportType');
+    const typeLabel=typeSel?typeSel.options[typeSel.selectedIndex].text:'';
+    const clone=src.cloneNode(true);
+    clone.querySelectorAll('details').forEach(d=>{ d.open=true; d.setAttribute('open',''); });
+    clone.querySelectorAll('[style*="overflow"]').forEach(e=>{ e.style.overflow='visible'; });
+    clone.querySelectorAll('button, input, select').forEach(e=>e.remove());
+    wrap.dir='rtl';
+    wrap.style.cssText='position:fixed;left:-20000px;top:0;width:820px;background:#fff;color:#1f2a24;padding:18px;box-sizing:border-box;font-family:inherit;';
+    const head=document.createElement('div');
+    head.style.cssText='font-weight:700;font-size:18px;margin-bottom:4px;';
+    head.textContent='ذمہ داران کی رپورٹ — '+urduMonths[mIdx]+' '+year;
+    const sub=document.createElement('div');
+    sub.style.cssText='font-size:13px;color:#555;margin-bottom:12px;border-bottom:1px solid #ccc;padding-bottom:8px;';
+    sub.textContent=typeLabel+' — تیار کردہ: '+new Date().toLocaleDateString('en-GB')+' ('+(currentUser.name||'')+')';
+    wrap.appendChild(head); wrap.appendChild(sub); wrap.appendChild(clone);
+    document.body.appendChild(wrap);
+    const canvas=await html2canvas(wrap,{scale:2,backgroundColor:'#ffffff',useCORS:true,logging:false});
+    const MAXH=9000; // بہت لمبی رپورٹ کئی تصویروں میں بٹ جاتی ہے (موبائل کی حد کے لیے)
+    const parts=Math.max(1,Math.ceil(canvas.height/MAXH));
+    const base=`report-${urduMonths[mIdx]}-${year}`;
+    for(let i=0;i<parts;i++){
+      const h=Math.min(MAXH,canvas.height-i*MAXH);
+      const c=document.createElement('canvas'); c.width=canvas.width; c.height=h;
+      const ctx=c.getContext('2d'); ctx.fillStyle='#fff'; ctx.fillRect(0,0,c.width,h);
+      ctx.drawImage(canvas,0,i*MAXH,canvas.width,h,0,0,canvas.width,h);
+      _saveBlobAs(_dataUrlToBlob(c.toDataURL('image/jpeg',0.92)), parts>1?`${base}-part${i+1}.jpg`:`${base}.jpg`);
+      if(i<parts-1) await new Promise(r=>setTimeout(r,700));
+    }
+    toast(parts>1?`رپورٹ ${parts} JPG تصویروں میں ڈاؤن لوڈ ہو گئی`:'رپورٹ JPG میں ڈاؤن لوڈ ہو گئی');
+  }catch(err){
+    console.error(err);
+    toast('JPG نہیں بن سکی، دوبارہ کوشش کریں');
+  }finally{
+    if(wrap.parentNode) wrap.parentNode.removeChild(wrap);
+    if(btn){ btn.disabled=false; btn.textContent=oldTxt; }
+  }
+}
+
 async function shareWhatsApp(){
   const noteEl=document.getElementById('pdfStatusNote');
   function doShare(blob){
@@ -4975,7 +5027,7 @@ Object.assign(window, {
   clearSignaturePad, closeSignatureModal, confirmSignatureAndApprove, approveWithSignature, submitWithSignature,
   openDayEditor, toggleDayEditor, onMeterChange, closeDayEditor, saveDayEntry, addRemark,
   changeOwnPin, resetSubordinatePin, toggleAccountStatus, editOrgName, approveCurrentStage, sendBackCurrentStage, submitMonth, filterSubList,
-  generateAndDownloadPdf, generateAndDownloadJpg, downloadSingleVerifiedJpg, bulkDownloadVerifiedJpg, shareWhatsApp, renderDaysList, populateLocationDatalists,
+  generateAndDownloadPdf, downloadReportJpg, generateAndDownloadJpg, downloadSingleVerifiedJpg, bulkDownloadVerifiedJpg, shareWhatsApp, renderDaysList, populateLocationDatalists,
   onAdminPickRoleChange, onAdminPickUserChange, backToOwnFromPicker, toggleSelectAllSub, bulkLockProfiles, confirmMailedToFinance, adminClearMonthEntries, renderDistrictReport, onReportGroupChange, initPermitsTab, filterPermitUsers, selectPermitUser, grantPermit, revokePermit, onPermitScopeChange, updatePermitGroupInfo, revokePermitBatch, revokeAllPermits, migrateOldSubmittedStages, verifyMemberProfile, adminDeletePhotos, switchDoProfileMode, filterDoProfileList, selectDoProfile, filterAdminSearchList, selectAdminSearchResult, markSentToBank,
   renderSubmittedList, renderVerifiedList,
   initAssignSupTab, onAssignDistrictChange, onAssignSupervisorChange, saveDistrictAssignments, unassignBoxDirect,
