@@ -146,6 +146,7 @@
   .day-row.date-locked{opacity:.65;}
 </style>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
 </head>
 <body>
 <div id="bootLoadingOverlay" style="position:fixed;inset:0;background:#EEF1EC;z-index:999999;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;">
@@ -572,6 +573,7 @@
         </div>
         <div id="verifiedList"></div>
         <button class="btn-primary" style="margin-top:12px;" onclick="bulkDownloadVerifiedPdf()">📄 منتخب شدہ کی PDF ڈاؤن لوڈ کریں</button>
+        <button class="btn-primary" style="margin-top:8px;background:#6b4e9b;" onclick="bulkDownloadVerifiedJpg()">🖼️ منتخب شدہ کی JPG (ZIP) ڈاؤن لوڈ کریں</button>
         <div class="note" id="bulkPdfStatusNote"></div>
         <button class="btn-primary hidden" id="districtExcelBtn" style="margin-top:12px;background:#1a6e3c;" onclick="downloadDistrictExcelSummary()">📊 ضلع کی مکمل Excel فائل ڈاؤن لوڈ کریں</button>
         <div class="note" id="districtExcelStatusNote"></div>
@@ -698,6 +700,7 @@
           (نہ پرنٹ باکس، نہ پاپ اپ) — A4 سائز، ایک ہی صفحے پر۔ اب PDF میں یہ بھی صاف نظر آئے گا کہ کس تاریخ سے کس تاریخ تک کونسے پٹرول ریٹ پر حساب ہوا۔ اس کے بعد وہی فائل واٹس ایپ سے شیئر کر سکتے ہیں۔
         </p>
         <button class="btn-primary" onclick="generateAndDownloadPdf()">📄 PDF فائل بنائیں اور ڈاؤن لوڈ کریں</button>
+        <button class="btn-primary" style="margin-top:10px;background:#6b4e9b;" onclick="generateAndDownloadJpg()">🖼️ JPG تصویر بنائیں اور ڈاؤن لوڈ کریں</button>
         <button class="btn-primary" style="margin-top:10px;background:#25D366;color:#fff;" onclick="shareWhatsApp()">📲 واٹس ایپ پر شیئر کریں</button>
         <div class="note" id="pdfStatusNote">PDF بنانے اور محفوظ ریکارڈ لوڈ کرنے کے لیے انٹرنیٹ درکار ہے۔</div>
       </div>
@@ -2890,11 +2893,13 @@ async function renderVerifiedList(){
     const canSendToBank = (currentUser.role==='finance' || currentUser.role==='admin');
     const rightActions = isViewOnly ? '' : (isAwaiting
       ? `<button class="btn-ghost btn-sm" onclick="downloadSingleVerifiedPdf('${a.code}',${a.year},${a.month},event)">📄 PDF ڈاؤن لوڈ کریں</button>
+         <button class="btn-ghost btn-sm" onclick="downloadSingleVerifiedJpg('${a.code}',${a.year},${a.month},event)">🖼️ JPG</button>
          <label style="display:flex;align-items:center;gap:4px;font-size:12px;cursor:pointer;" onclick="event.stopPropagation()">
            <input type="checkbox" onchange="confirmMailedToFinance(this,'${a.code}',${a.year},${a.month})"> فنانس کو میل کر دیا
          </label>
          <button class="btn-ghost btn-sm" onclick="quickSendBack('${a.code}',${a.year},${a.month},event)">↩️ واپس بھیجیں</button>`
       : `<button class="btn-ghost btn-sm" onclick="downloadSingleVerifiedPdf('${a.code}',${a.year},${a.month},event)">📄 PDF</button>
+         <button class="btn-ghost btn-sm" onclick="downloadSingleVerifiedJpg('${a.code}',${a.year},${a.month},event)">🖼️ JPG</button>
          ${canSendToBank && !a.sentToBank ? `<label style="display:flex;align-items:center;gap:4px;font-size:12px;cursor:pointer;" onclick="event.stopPropagation()">
            <input type="checkbox" onchange="markSentToBank(this,'${a.code}',${a.year},${a.month})"> 🏦 بینک کو بھیج دیا
          </label>` : ''}
@@ -4764,6 +4769,86 @@ async function generateAndDownloadPdf(){
   toast('PDF تیار ✓');
 }
 
+/* ---------------- JPG ڈاؤن لوڈ (PDF جیسی ہی تصویریں، بس JPG فائل کی صورت میں) ---------------- */
+function _dataUrlToBlob(dataUrl){
+  const parts=String(dataUrl).split(',');
+  const mime=(parts[0].match(/:(.*?);/)||[])[1]||'image/jpeg';
+  const bin=atob(parts[1]); const u8=new Uint8Array(bin.length);
+  for(let i=0;i<bin.length;i++) u8[i]=bin.charCodeAt(i);
+  return new Blob([u8],{type:mime});
+}
+function _saveBlobAs(blob, fname){
+  const url=URL.createObjectURL(blob);
+  const a=document.createElement('a'); a.href=url; a.download=fname;
+  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  setTimeout(()=>URL.revokeObjectURL(url), 4000);
+}
+// pages[0] = اصل سفری صفحہ، باقی ٹکٹ/رسید کی تصویریں
+function _jpgNames(base, n){ return Array.from({length:n},(_,i)=> i===0 ? `${base}.jpg` : `${base}-ticket${i}.jpg`); }
+async function _downloadPagesAsJpgFiles(pages, base){
+  const names=_jpgNames(base, pages.length);
+  for(let i=0;i<pages.length;i++){
+    _saveBlobAs(_dataUrlToBlob(pages[i].dataUrl), names[i]);
+    if(i<pages.length-1) await new Promise(r=>setTimeout(r,700));
+  }
+}
+async function generateAndDownloadJpg(){
+  const noteEl=document.getElementById('pdfStatusNote');
+  noteEl.textContent='JPG بنانے کے لیے ریکارڈ لوڈ ہو رہا ہے...';
+  try{
+    const profile=getProfileFromForm();
+    const canvas=await drawLedgerCanvas();
+    const pages=[{dataUrl:canvas.toDataURL('image/jpeg',0.95)}];
+    const tickets=await loadTicketPagesFor(activeCode(), profile.year, profile.month);
+    tickets.forEach(t=>pages.push({dataUrl:t.dataUrl}));
+    await _downloadPagesAsJpgFiles(pages, `safri-${profile.code}-${urduMonths[profile.month]}-${profile.year}`);
+    noteEl.textContent='JPG ڈاؤن لوڈ ہو گئی ✓'+(pages.length>1?` (${pages.length} تصویریں: 1 سفری صفحہ + ${pages.length-1} ٹکٹ/رسید)`:'');
+    toast('JPG ڈاؤن لوڈ ہو گئی');
+  }catch(err){
+    console.error(err);
+    noteEl.textContent='JPG نہیں بن سکی، انٹرنیٹ چیک کر کے دوبارہ کوشش کریں';
+  }
+}
+async function downloadSingleVerifiedJpg(code, year, month, evt){
+  if(evt) evt.stopPropagation();
+  const noteEl=document.getElementById('bulkPdfStatusNote');
+  noteEl.textContent='JPG بنانے کے لیے ریکارڈ لوڈ ہو رہا ہے...';
+  try{
+    const pages = await buildFullPdfPagesFor(code, year, month);
+    if(!pages.length){ noteEl.textContent='JPG بنانے کے لیے ریکارڈ نہیں ملا'; return; }
+    await _downloadPagesAsJpgFiles(pages, `safri-${code}-${urduMonths[month]}-${year}`);
+    noteEl.textContent='JPG ڈاؤن لوڈ ہو گئی ✓'+(pages.length>1?` (${pages.length} تصویریں)`:'');
+  }catch(err){ console.error(err); noteEl.textContent='JPG نہیں بن سکی، دوبارہ کوشش کریں'; }
+}
+async function bulkDownloadVerifiedJpg(){
+  const checked = Array.from(document.querySelectorAll('.verified-check:checked')).map(el=>({
+    code:el.dataset.code, year:parseInt(el.dataset.year), month:parseInt(el.dataset.month)
+  }));
+  if(!checked.length){ toast('کم از کم ایک ریکارڈ منتخب کریں'); return; }
+  const noteEl=document.getElementById('bulkPdfStatusNote');
+  try{
+    if(checked.length===1){
+      await downloadSingleVerifiedJpg(checked[0].code, checked[0].year, checked[0].month);
+      return;
+    }
+    if(typeof JSZip==='undefined'){ toast('ZIP کا ٹول لوڈ نہیں ہوا، انٹرنیٹ چیک کر کے صفحہ ریفریش کریں'); return; }
+    const zip=new JSZip(); let total=0;
+    for(let i=0;i<checked.length;i++){
+      const it=checked[i];
+      noteEl.textContent=`JPG بن رہی ہیں... (${i+1}/${checked.length})`;
+      const pages=await buildFullPdfPagesFor(it.code, it.year, it.month);
+      const names=_jpgNames(`safri-${it.code}-${urduMonths[it.month]}-${it.year}`, pages.length);
+      pages.forEach((p,k)=>{ zip.file(names[k], _dataUrlToBlob(p.dataUrl)); total++; });
+    }
+    if(!total){ noteEl.textContent='JPG بنانے کے لیے ریکارڈ نہیں ملے'; return; }
+    noteEl.textContent='ZIP فائل بن رہی ہے...';
+    const blob=await zip.generateAsync({type:'blob'});
+    _saveBlobAs(blob, `safri-jpg-${checked.length}-records-${new Date().toISOString().slice(0,10)}.zip`);
+    noteEl.textContent=`ZIP ڈاؤن لوڈ ہو گئی ✓ (${checked.length} ریکارڈ، ${total} تصویریں)`;
+    toast('ZIP ڈاؤن لوڈ ہو گئی');
+  }catch(err){ console.error(err); noteEl.textContent='JPG/ZIP نہیں بن سکی، دوبارہ کوشش کریں'; }
+}
+
 async function shareWhatsApp(){
   const noteEl=document.getElementById('pdfStatusNote');
   function doShare(blob){
@@ -4890,7 +4975,7 @@ Object.assign(window, {
   clearSignaturePad, closeSignatureModal, confirmSignatureAndApprove, approveWithSignature, submitWithSignature,
   openDayEditor, toggleDayEditor, onMeterChange, closeDayEditor, saveDayEntry, addRemark,
   changeOwnPin, resetSubordinatePin, toggleAccountStatus, editOrgName, approveCurrentStage, sendBackCurrentStage, submitMonth, filterSubList,
-  generateAndDownloadPdf, shareWhatsApp, renderDaysList, populateLocationDatalists,
+  generateAndDownloadPdf, generateAndDownloadJpg, downloadSingleVerifiedJpg, bulkDownloadVerifiedJpg, shareWhatsApp, renderDaysList, populateLocationDatalists,
   onAdminPickRoleChange, onAdminPickUserChange, backToOwnFromPicker, toggleSelectAllSub, bulkLockProfiles, confirmMailedToFinance, adminClearMonthEntries, renderDistrictReport, onReportGroupChange, initPermitsTab, filterPermitUsers, selectPermitUser, grantPermit, revokePermit, onPermitScopeChange, updatePermitGroupInfo, revokePermitBatch, revokeAllPermits, migrateOldSubmittedStages, verifyMemberProfile, adminDeletePhotos, switchDoProfileMode, filterDoProfileList, selectDoProfile, filterAdminSearchList, selectAdminSearchResult, markSentToBank,
   renderSubmittedList, renderVerifiedList,
   initAssignSupTab, onAssignDistrictChange, onAssignSupervisorChange, saveDistrictAssignments, unassignBoxDirect,
