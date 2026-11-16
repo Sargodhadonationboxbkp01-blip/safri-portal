@@ -4851,50 +4851,89 @@ async function bulkDownloadVerifiedJpg(){
   }catch(err){ console.error(err); noteEl.textContent='JPG/ZIP نہیں بن سکی، دوبارہ کوشش کریں'; }
 }
 
-/* ---------------- رپورٹس ٹیب: رپورٹ کو JPG تصویر میں ڈاؤن لوڈ ---------------- */
+/* ---------------- رپورٹس ٹیب: رپورٹ کو JPG تصویر میں ڈاؤن لوڈ ----------------
+   لمبی رپورٹ (سپروائزر وائز / ضلعی ذمہ دار وائز) ایک ہی بڑی تصویر میں نہیں بنتی (براؤزر کی حد)،
+   اس لیے رپورٹ کو ٹکڑوں میں بانٹ کر ہر ٹکڑے کی الگ JPG بنتی ہے؛ 3 یا زیادہ ہوں تو ایک ZIP میں آتی ہیں۔ */
 async function downloadReportJpg(){
   const src=document.getElementById('distReportBody');
   if(!src || !src.textContent.trim() || src.querySelector('.empty')){ toast('پہلے "رپورٹ دیکھیں" دبا کر رپورٹ کھولیں'); return; }
   if(typeof html2canvas==='undefined'){ toast('تصویر بنانے کا ٹول لوڈ نہیں ہوا، انٹرنیٹ چیک کر کے صفحہ ریفریش کریں'); return; }
   const btn=document.getElementById('reportJpgBtn');
   const oldTxt=btn?btn.textContent:'';
-  if(btn){ btn.disabled=true; btn.textContent='تصویر بن رہی ہے...'; }
+  const setBtn=(t)=>{ if(btn){ btn.textContent=t; } };
+  if(btn){ btn.disabled=true; }
+  setBtn('تصویر بن رہی ہے...');
   const wrap=document.createElement('div');
   try{
     const mIdx=parseInt(document.getElementById('distReportMonth').value)||0;
     const year=parseInt(document.getElementById('distReportYear').value)||new Date().getFullYear();
     const typeSel=document.getElementById('distReportType');
     const typeLabel=typeSel?typeSel.options[typeSel.selectedIndex].text:'';
+    const groupSel=document.getElementById('distReportGroupBy');
+    const groupLabel=(groupSel && groupSel.value==='supervisor') ? 'سپروائزر / ضلعی ذمہ دار وائز' : 'ضلع وائز';
     const clone=src.cloneNode(true);
     clone.querySelectorAll('details').forEach(d=>{ d.open=true; d.setAttribute('open',''); });
     clone.querySelectorAll('[style*="overflow"]').forEach(e=>{ e.style.overflow='visible'; });
     clone.querySelectorAll('button, input, select').forEach(e=>e.remove());
+
     wrap.dir='rtl';
-    wrap.style.cssText='position:fixed;left:-20000px;top:0;width:820px;background:#fff;color:#1f2a24;padding:18px;box-sizing:border-box;font-family:inherit;';
+    wrap.style.cssText='position:fixed;left:-20000px;top:0;width:820px;background:#fff;color:#1f2a24;box-sizing:border-box;font-family:inherit;';
     const head=document.createElement('div');
-    head.style.cssText='font-weight:700;font-size:18px;margin-bottom:4px;';
-    head.textContent='ذمہ داران کی رپورٹ — '+urduMonths[mIdx]+' '+year;
-    const sub=document.createElement('div');
-    sub.style.cssText='font-size:13px;color:#555;margin-bottom:12px;border-bottom:1px solid #ccc;padding-bottom:8px;';
-    sub.textContent=typeLabel+' — تیار کردہ: '+new Date().toLocaleDateString('en-GB')+' ('+(currentUser.name||'')+')';
-    wrap.appendChild(head); wrap.appendChild(sub); wrap.appendChild(clone);
+    head.style.cssText='padding:14px 18px 8px;background:#fff;';
+    head.innerHTML='<div style="font-weight:700;font-size:18px;margin-bottom:4px;"></div><div style="font-size:13px;color:#555;border-bottom:1px solid #ccc;padding-bottom:8px;"></div>';
+    head.children[0].textContent='ذمہ داران کی رپورٹ — '+urduMonths[mIdx]+' '+year;
+    head.children[1].textContent=groupLabel+' — '+typeLabel+' — تیار کردہ: '+new Date().toLocaleDateString('en-GB')+' ('+(currentUser.name||'')+')';
+    // سب حصے ایک فہرست میں: پہلے سرخی، پھر رپورٹ کے اوپر کے سب بلاک
+    const units=[head].concat(Array.from(clone.children));
+    const holder=document.createElement('div');
+    holder.style.cssText='padding:0 18px;background:#fff;';
     document.body.appendChild(wrap);
-    const canvas=await html2canvas(wrap,{scale:2,backgroundColor:'#ffffff',useCORS:true,logging:false});
-    const MAXH=9000; // بہت لمبی رپورٹ کئی تصویروں میں بٹ جاتی ہے (موبائل کی حد کے لیے)
-    const parts=Math.max(1,Math.ceil(canvas.height/MAXH));
+    wrap.appendChild(holder);
+    units.forEach(u=>{ u.style.boxSizing='border-box'; });
+    // ناپنے کے لیے سب کو رکھتے ہیں
+    units.forEach(u=>{ (u===head?wrap:holder).appendChild(u); });
+    await new Promise(r=>setTimeout(r,60));
+
+    // ٹکڑے: ہر ٹکڑا تقریباً 3200 px (CSS) تک
+    const LIMIT=3200;
+    const chunks=[]; let cur=null, curH=0;
+    function newChunk(){ cur=document.createElement('div'); cur.style.cssText='background:#fff;padding:0 18px;box-sizing:border-box;width:820px;'; chunks.push(cur); curH=0; }
+    newChunk();
+    units.forEach(u=>{
+      const h=(u.offsetHeight||0)+10;
+      if(curH>0 && curH+h>LIMIT){ newChunk(); }
+      cur.appendChild(u); curH+=h;
+    });
+    // پرانے خالی holder کو ہٹا کر ٹکڑے wrap میں رکھتے ہیں
+    wrap.innerHTML='';
+    chunks.forEach(c=>wrap.appendChild(c));
+    await new Promise(r=>setTimeout(r,60));
+
     const base=`report-${urduMonths[mIdx]}-${year}`;
-    for(let i=0;i<parts;i++){
-      const h=Math.min(MAXH,canvas.height-i*MAXH);
-      const c=document.createElement('canvas'); c.width=canvas.width; c.height=h;
-      const ctx=c.getContext('2d'); ctx.fillStyle='#fff'; ctx.fillRect(0,0,c.width,h);
-      ctx.drawImage(canvas,0,i*MAXH,canvas.width,h,0,0,canvas.width,h);
-      _saveBlobAs(_dataUrlToBlob(c.toDataURL('image/jpeg',0.92)), parts>1?`${base}-part${i+1}.jpg`:`${base}.jpg`);
-      if(i<parts-1) await new Promise(r=>setTimeout(r,700));
+    const files=[];
+    for(let i=0;i<chunks.length;i++){
+      setBtn(`تصویر بن رہی ہے (${i+1}/${chunks.length})...`);
+      const tall=chunks[i].offsetHeight>7000;
+      const canvas=await html2canvas(chunks[i],{scale:tall?1:2,backgroundColor:'#ffffff',useCORS:true,logging:false});
+      files.push({name: chunks.length>1?`${base}-part${i+1}.jpg`:`${base}.jpg`, blob:_dataUrlToBlob(canvas.toDataURL('image/jpeg',0.92))});
+      await new Promise(r=>setTimeout(r,20));
     }
-    toast(parts>1?`رپورٹ ${parts} JPG تصویروں میں ڈاؤن لوڈ ہو گئی`:'رپورٹ JPG میں ڈاؤن لوڈ ہو گئی');
+    if(files.length>=3 && typeof JSZip!=='undefined'){
+      setBtn('ZIP بن رہی ہے...');
+      const zip=new JSZip();
+      files.forEach(f=>zip.file(f.name,f.blob));
+      _saveBlobAs(await zip.generateAsync({type:'blob'}), `${base}-jpg.zip`);
+      toast(`رپورٹ ${files.length} JPG تصویروں کی ZIP میں ڈاؤن لوڈ ہو گئی`);
+    } else {
+      for(let i=0;i<files.length;i++){
+        _saveBlobAs(files[i].blob, files[i].name);
+        if(i<files.length-1) await new Promise(r=>setTimeout(r,700));
+      }
+      toast(files.length>1?`رپورٹ ${files.length} JPG تصویروں میں ڈاؤن لوڈ ہو گئی`:'رپورٹ JPG میں ڈاؤن لوڈ ہو گئی');
+    }
   }catch(err){
     console.error(err);
-    toast('JPG نہیں بن سکی، دوبارہ کوشش کریں');
+    toast('JPG نہیں بن سکی: '+String((err&&err.message)||err).substring(0,80));
   }finally{
     if(wrap.parentNode) wrap.parentNode.removeChild(wrap);
     if(btn){ btn.disabled=false; btn.textContent=oldTxt; }
