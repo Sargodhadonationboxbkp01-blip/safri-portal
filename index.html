@@ -579,6 +579,12 @@
         <div class="note" id="bulkPdfStatusNote"></div>
         <button class="btn-primary hidden" id="districtExcelBtn" style="margin-top:12px;background:#1a6e3c;" onclick="downloadDistrictExcelSummary()">📊 ضلع کی مکمل Excel فائل ڈاؤن لوڈ کریں</button>
         <div class="note" id="districtExcelStatusNote"></div>
+        <div id="divisionExcelBox" class="hidden" style="margin-top:14px;padding-top:12px;border-top:1px dashed #bbb;">
+          <label style="font-size:13px;display:block;margin-bottom:4px;">پوری ڈویژن کی Excel (ایک ہی فائل میں سب اضلاع)</label>
+          <select id="divisionExcelSel" style="width:100%;margin-bottom:8px;"></select>
+          <button class="btn-primary" id="divisionExcelBtn" style="background:#0f5132;" onclick="downloadDivisionExcelSummary()">📊 پوری ڈویژن کی Excel فائل بنائیں</button>
+          <div class="note" id="divisionExcelStatusNote"></div>
+        </div>
       </div>
     </div>
 
@@ -2852,6 +2858,9 @@ async function renderVerifiedList(){
   const myRole = currentUser.role||'box';
   document.getElementById('districtExcelBtn').classList.toggle('hidden', !(myRole==='district_office' || myRole==='admin'));
   document.getElementById('districtExcelStatusNote').textContent='';
+  const _dvBox=document.getElementById('divisionExcelBox');
+  _dvBox.classList.toggle('hidden', myRole!=='admin');
+  if(myRole==='admin'){ document.getElementById('divisionExcelStatusNote').textContent=''; populateDivisionExcelSelect(); }
   await populateAdminDistrictFilter('verifiedFilterDistrict','verifiedDistrictWrap');
   const subs = await getSubordinates();
   const subMap={}; subs.forEach(u=>subMap[u.code]=u);
@@ -4922,6 +4931,129 @@ async function downloadReportJpg(){
   }
 }
 
+/* ---------------- پوری ڈویژن کی Excel فائل (صرف ایڈمن) ----------------
+   ایک ہی فائل: پہلی شیٹ "Division" میں ڈویژن کے سب ذمہ داران، اس کے بعد ہر ضلع کی اپنی شیٹ (ضلع وائز Excel کے فارمیٹ میں)۔
+   ہر ذمہ دار صرف ایک ہی ضلع میں آتا ہے (2 اضلاع ہوں تو پہلے ضلع میں)، اس لیے رقم دہری نہیں ہوتی۔ */
+async function populateDivisionExcelSelect(){
+  const sel=document.getElementById('divisionExcelSel');
+  if(!sel) return;
+  const users=await getAllUsers();
+  const set={};
+  users.forEach(u=>{ if(u && u.status!=='closed' && u.division) set[normLoc(u.division)]=u.division; });
+  const names=Object.keys(set).map(k=>({v:k,t:set[k]})).sort((a,b)=>a.t.localeCompare(b.t,'ur'));
+  sel.innerHTML='<option value="">— ڈویژن منتخب کریں —</option>'+names.map(n=>`<option value="${escapeHtml(n.v)}">${escapeHtml(n.t)}</option>`).join('');
+}
+async function _poolMap(items, n, fn){
+  const out=new Array(items.length); let next=0;
+  await Promise.all(Array.from({length:Math.min(n,items.length)}, async ()=>{
+    while(true){ const k=next++; if(k>=items.length) break; out[k]=await fn(items[k],k); }
+  }));
+  return out;
+}
+function _excelSheetName(name, used){
+  let n=String(name||'Sheet').replace(/[\[\]:*?\/\\]/g,' ').replace(/\s+/g,' ').trim().substring(0,28) || 'Sheet';
+  let cand=n, k=2;
+  while(used[cand.toLowerCase()]){ cand=n.substring(0,26)+' '+k; k++; }
+  used[cand.toLowerCase()]=true;
+  return cand;
+}
+async function downloadDivisionExcelSummary(){
+  if(currentUser.role!=='admin'){ toast('یہ صرف ایڈمن کے لیے ہے'); return; }
+  if(typeof XLSX==='undefined'){ toast('Excel لائبریری لوڈ نہیں ہو سکی — انٹرنیٹ چیک کریں'); return; }
+  const noteEl=document.getElementById('divisionExcelStatusNote');
+  const btn=document.getElementById('divisionExcelBtn');
+  const divKey=document.getElementById('divisionExcelSel').value;
+  if(!divKey){ toast('پہلے ڈویژن منتخب کریں'); return; }
+  const fMonthEl=document.getElementById('verifiedFilterMonth');
+  const fYearEl=document.getElementById('verifiedFilterYear');
+  const month=(fMonthEl && fMonthEl.value!=='all') ? parseInt(fMonthEl.value,10) : new Date().getMonth();
+  const year=(fYearEl && fYearEl.value) ? parseInt(fYearEl.value,10) : new Date().getFullYear();
+  if(btn) btn.disabled=true;
+  try{
+    noteEl.textContent='ڈویژن کے ذمہ داران کی فہرست بن رہی ہے...';
+    const all=await getAllUsers();
+    const divUsers=all.filter(u=>u && u.code && u.status!=='closed' && u.role!=='admin' && u.role!=='finance' && normLoc(u.division)===divKey)
+                      .sort((a,b)=>(a.name||'').localeCompare(b.name||'','ur'));
+    if(!divUsers.length){ noteEl.textContent='اس ڈویژن میں کوئی ذمہ دار نہیں ملا۔'; return; }
+    const divLabel=(all.find(u=>normLoc(u.division)===divKey)||{}).division||divKey;
+
+    const globalCfg=await loadGlobalPetrolConfig();
+    const canonicalGroups=await getRateBreakdownForMonth(globalCfg.slabs||[], globalCfg.defaultRate||0, year, month, null);
+    const periodLabel=g=>{ const sd=parseInt(g.start.slice(8,10),10), ed=parseInt(g.end.slice(8,10),10); return 'KM '+(sd===ed?sd:(sd+'-'+ed)); };
+
+    let done=0; const t0=Date.now(); const failed=[];
+    const buildRow=async(u)=>{
+      let data=null;
+      for(let attempt=1;attempt<=2 && !data;attempt++){
+        try{ data=await buildLedgerData(u.code, year, month); }catch(e){ console.error('division excel',u.code,e); }
+      }
+      done++;
+      const left=divUsers.length-done;
+      const eta=Math.max(1,Math.ceil(((Date.now()-t0)/done*left)/1000));
+      noteEl.textContent=left>0?`Excel تیار ہو رہی ہے... (${done}/${divUsers.length} مکمل، تقریباً ${eta} سیکنڈ باقی)`:`Excel تیار ہو رہی ہے... (${done}/${divUsers.length} مکمل، فائل بن رہی ہے)`;
+      const rawDist=(u.districts&&u.districts.length)?u.districts[0]:(u.district||'');
+      if(!data){ failed.push(u.code+' '+(u.name||'')); return {dist:rawDist, r:['',u.code,(u.name||'')+' (ڈیٹا نہیں آیا)',ROLE_LABELS[u.role]||u.role||'','','','','','','','','','',...canonicalGroups.map(()=>'')]}; }
+      const kmByPeriod=canonicalGroups.map(cg=>{ const m=data.rateBreakdown.find(g=>g.start===cg.start && g.end===cg.end); return m?Math.round(m.km||0):0; });
+      return {dist:rawDist, r:[
+        '', u.code, data.profile.name||u.name||'', ROLE_LABELS[u.role]||u.role||'',
+        data.profile.bankName||'', data.profile.branchCode||'', data.profile.accNo||'',
+        Math.round(data.netPayable||0), Math.round(data.monthlyDeduction||0),
+        Math.round((data.totalPetrol||0)+(data.totalMaintenance||0)), Math.round(data.totalFare||0),
+        '', data.profile.bikeAvg||'', ...kmByPeriod
+      ]};
+    };
+    // ایک ساتھ 4 ذمہ داران (تاکہ پوری ڈویژن جلد بنے)
+    const built=await _poolMap(divUsers, 4, buildRow);
+
+    // ضلع کے حساب سے گروپ
+    const groups={};
+    built.forEach(b=>{ const key=b.dist?normLoc(b.dist):'__none'; (groups[key]=groups[key]||{label:b.dist||'بغیر ضلع / ڈویژن دفتر', rows:[]}).rows.push(b.r); });
+    const gKeys=Object.keys(groups).sort((a,b)=>{ if(a==='__none') return 1; if(b==='__none') return -1; return groups[a].label.localeCompare(groups[b].label,'ur'); });
+
+    const header=['Sr.','Employee Code','Name','Designation','Bank','B.Code','Bank A/c No.','Amount','Deductions','Conveyance (KM)','Conveyance (Fare)','Request By','Bike Average', ...canonicalGroups.map(periodLabel)];
+    const topRows=(title)=>{
+      const w=[]; w.push([title]); w.push(['Sr.No','تاریخ (از - تا)','پیٹرول ریٹ']);
+      canonicalGroups.forEach((g,i)=>w.push([i+1, g.start===g.end?g.start:(g.start+' سے '+g.end), fmtNumRound(g.rate)]));
+      w.push([]); return w;
+    };
+    const totalsRow=(rows)=>{ const t=['','','کل','','','','',0,0,0,0]; rows.forEach(r=>{ for(let c=7;c<=10;c++) t[c]+=(parseFloat(r[c])||0); }); return t; };
+    const colsW=[{wch:5},{wch:12},{wch:24},{wch:20},{wch:10},{wch:9},{wch:20},{wch:10},{wch:10},{wch:14},{wch:14},{wch:12},{wch:10},...canonicalGroups.map(()=>({wch:10})),{wch:18}];
+    const wb=XLSX.utils.book_new();
+    const used={};
+
+    // پہلی شیٹ: پوری ڈویژن (ضلع کا کالم آخر میں)
+    const allWs=topRows('پیٹرول ریٹ شیڈول — ڈویژن '+divLabel+' — '+urduMonths[month]+' '+year);
+    allWs.push(header.concat(['District']));
+    let sr=0; const allRows=[];
+    gKeys.forEach(k=>groups[k].rows.forEach(r=>{ sr++; const rr=r.slice(); rr[0]=sr; allRows.push(rr); allWs.push(rr.concat([groups[k].label])); }));
+    allWs.push(totalsRow(allRows));
+    const ws0=XLSX.utils.aoa_to_sheet(allWs); ws0['!cols']=colsW;
+    XLSX.utils.book_append_sheet(wb, ws0, _excelSheetName('Division',used));
+
+    // ہر ضلع کی اپنی شیٹ
+    gKeys.forEach(k=>{
+      const g=groups[k];
+      const w=topRows('پیٹرول ریٹ شیڈول — ضلع '+g.label+' — '+urduMonths[month]+' '+year);
+      w.push(header);
+      const rows=g.rows.map((r,i)=>{ const rr=r.slice(); rr[0]=i+1; return rr; });
+      rows.forEach(r=>w.push(r));
+      w.push(totalsRow(rows));
+      const ws=XLSX.utils.aoa_to_sheet(w); ws['!cols']=colsW;
+      XLSX.utils.book_append_sheet(wb, ws, _excelSheetName(g.label,used));
+    });
+
+    const fname=`Division_${String(divLabel).replace(/[^a-zA-Z0-9\u0600-\u06FF]+/g,'_')}_${urduMonths[month]}_${year}.xlsx`;
+    XLSX.writeFile(wb, fname);
+    noteEl.textContent=`Excel ڈاؤن لوڈ ہو گئی ✓ (${divUsers.length} ذمہ داران، ${gKeys.length} اضلاع)`+(failed.length?` — ⚠️ ان کا ڈیٹا نہیں آ سکا (فائل میں نشان لگا ہے): ${failed.join('، ')}`:'');
+    toast('ڈویژن کی Excel تیار ✓');
+  }catch(err){
+    console.error(err);
+    noteEl.textContent='Excel نہیں بن سکی: '+String((err&&err.message)||err).substring(0,100);
+  }finally{
+    if(btn) btn.disabled=false;
+  }
+}
+
 async function shareWhatsApp(){
   const noteEl=document.getElementById('pdfStatusNote');
   function doShare(blob){
@@ -5041,7 +5173,7 @@ Object.assign(window, {
   saveProfileData, onMonthChange, shiftMonth, addSlabRow, removeSlabRow, saveSlabs, renderRateBreakdownPreview,
   addGlobalSlabRow, removeGlobalSlabRow, saveGlobalPetrol, onGlobalSlabFilterChange, renderGlobalRateBreakdown,
   showAppTab, doLogout, openSubordinate, backToOwn, openSubmittedItem, quickSendBack,
-  toggleSelectAllVerified, downloadSingleVerifiedPdf, bulkDownloadVerifiedPdf, downloadDistrictExcelSummary,
+  toggleSelectAllVerified, downloadSingleVerifiedPdf, bulkDownloadVerifiedPdf, downloadDistrictExcelSummary, downloadDivisionExcelSummary, populateDivisionExcelSelect,
   previewCurrentLedger, previewLedgerFor, closePreviewModal, approveFromPreview, sendBackFromPreview,
   sendToFinanceNoSignature, sendToFinanceFromPreviewNoSignature,
   viewAttachmentFull, handleAttachmentUpload, removeAttachment, removeMeterPhoto,
